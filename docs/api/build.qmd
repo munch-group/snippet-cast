@@ -1,0 +1,61 @@
+# build { #snippet_cast.screencast.build }
+
+```python
+snippet_cast.screencast.build(
+    source_path,
+    out_path,
+    tts,
+    trace=True,
+    every=False,
+    subtitles=False,
+    typing=False,
+)
+```
+
+Render an annotated Python snippet into a narrated screencast video.
+
+Parses `source_path` for trailing ``#:`` narration comments, optionally
+executes it to capture a per-line variable state, and assembles one
+still-frame-plus-narration clip per beat into `out_path` with ffmpeg.
+
+## Parameters {.doc-section .doc-section-parameters}
+
+<code>[**source_path**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation}</code>
+
+:   Path to the annotated, still-valid Python snippet to narrate.
+
+<code>[**out_path**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation}</code>
+
+:   Path the assembled MP4 is written to.
+
+<code>[**tts**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation}</code>
+
+:   Name of a registered TTS backend (a key of `BACKENDS`): one of `"say"`, `"silent"`, `"piper"`, `"elevenlabs"`.
+
+<code>[**trace**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [True]{.parameter-default}</code>
+
+:   Execute the snippet under `sys.settrace` to capture the state panel. Required for `every=True`.
+
+<code>[**every**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [False]{.parameter-default}</code>
+
+:   Emit one beat per *execution* of a marked line (animates loops iteration by iteration) instead of one beat per marked line.
+
+<code>[**subtitles**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [False]{.parameter-default}</code>
+
+:   Burn the narration text onto each frame as a caption.
+
+<code>[**typing**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [False]{.parameter-default}</code>
+
+:   Type newly revealed lines character-by-character (first-execution mode only; has no effect when `every=True`).
+
+## Examples {.doc-section .doc-section-examples}
+
+```python
+from snippet_cast import build
+
+build("fib.py", "out.mp4", tts="silent", subtitles=True)
+```
+
+## See Also {.doc-section .doc-section-see-also}
+
+[](`snippet_cast.screencast.main`)

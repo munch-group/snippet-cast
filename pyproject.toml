@@ -3,30 +3,34 @@ requires = ["setuptools>=61.0", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "munch-group-library"
-version = "0.1.16"
-description = "Project description"
+name = "snippet-cast"
+version = "0.1.17"
+description = "Turn annotated Python snippets into narrated screencast videos."
 authors = [
-    {name = "Your Name", email = "your@email.com"}
+    {name = "Kasper Munch", email = "kaspermunch@birc.au.dk"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.9,<3.14"
+requires-python = ">=3.10,<3.14"
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-
+    "pillow",
+    "pygments",
 ]
 
 [project.urls]
-Homepage = "https://github.com/munch-group/munch-group-library"
-Repository = "https://github.com/munch-group/munch-group-library"
-Documentation = "https://munch-group.org/munch-group-library"
+Homepage = "https://github.com/munch-group/snippet-cast"
+Repository = "https://github.com/munch-group/snippet-cast"
+Documentation = "https://munch-group.org/snippet-cast"
 
 [project.scripts]
-munch-group-library = "munch_group_library:munch_group_library"
+snippet-cast = "snippet_cast:main"
+
+[project.optional-dependencies]
+piper = ["piper-tts"]
 
 [tool.setuptools]
 include-package-data = true
@@ -35,15 +39,16 @@ include-package-data = true
 where = ["src"]
 exclude = ["test*"]
 
-[tool.setuptools.package-data]
-munch_group_library = ["data/*.txt", "data/*.csv", "data/*.pickle", "data/*.h5"]
+[tool.pytest.ini_options]
+testpaths = ["test"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge", "munch-group"]
 platforms = ["osx-arm64",  "linux-64"]
 
 [tool.pixi.dependencies]
-python = ">=3.9,<3.14"
+python = ">=3.10,<3.14"
+ffmpeg = "*"
 pytest = "*"
 jupyter = "*"
 quarto = "*"
@@ -61,8 +66,8 @@ nbdime = ">=4.0.2,<5"
 vscodenb = "*"
 r-rsvg = "*"
 
-# [tool.pixi.pypi-dependencies]
-# munch-group-library = { path = ".", editable = true }
+[tool.pixi.pypi-dependencies]
+snippet-cast = { path = ".", editable = true }
 
 [tool.pixi.environments]
 default = {solve-group = "default"}

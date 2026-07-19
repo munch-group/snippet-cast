@@ -3,10 +3,7 @@ website:
   - contents:
     - api/index.qmd
     - contents:
-      - api/functionname.qmd
-      section: Some section
-    - contents:
-      - api/scriptname.qmd
-      section: Some other section
+      - api/build.qmd
+      section: Screencast API
     id: api
   - id: dummy-sidebar

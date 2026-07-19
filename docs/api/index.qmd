@@ -1,19 +1,11 @@
 # Function reference {.doc .doc-index}
 
-## Some section
+## Screencast API
 
-Some description...
-
-
-| | |
-| --- | --- |
-| [functionname](functionname.qmd#munch_group_library.modulename.functionname) | The sum of two numbers. |
-
-## Some other section
-
-Some description...
+Programmatic interface for turning an annotated Python snippet into a
+narrated screencast video.
 
 
 | | |
 | --- | --- |
-| [scriptname](scriptname.qmd#munch_group_library.modulename.scriptname) |  |
+| [build](build.qmd#snippet_cast.screencast.build) | Render an annotated Python snippet into a narrated screencast video. |

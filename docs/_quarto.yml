@@ -37,7 +37,7 @@ interlinks:
     #   inv: objects-test.txt
 
 website:
-  title: "munch-group-library"
+  title: "snippet-cast"
   page-navigation: true
   navbar:
     left:
@@ -47,7 +47,7 @@ website:
       #   text: Gallery
     right:
       - icon: github
-        href: https://github.com/munch-group/munch-group-library/
+        href: https://github.com/munch-group/snippet-cast/
   sidebar:
     - id: pages
       title: Get Started
@@ -76,7 +76,7 @@ format:
       theme: neutral 
 
 quartodoc:
-  package: munch-group-library
+  package: snippet-cast
   style: pkgdown
   dir: api
   render_interlinks: true
@@ -89,15 +89,10 @@ quartodoc:
   css: "api/_styles-quartodoc.css"
 
   sections:
-    - title: Some section
-      package: munch_group_library.modulename
+    - title: Screencast API
+      package: snippet_cast.screencast
       desc: |
-        Some description...
+        Programmatic interface for turning an annotated Python snippet into a
+        narrated screencast video.
       contents:
-        - functionname
-    - title: Some other section
-      package: munch_group_library.modulename
-      desc: |
-        Some description...
-      contents:
-        - scriptname
+        - build
