@@ -18,7 +18,10 @@ repo's usual pixi/setuptools/conda/PyPI scaffolding.
 
 Requires **Python 3.10+** (uses `int | None` annotations at runtime) and
 **ffmpeg + ffprobe on PATH** (declared as a `[tool.pixi.dependencies]` conda
-package). Python deps `pillow`/`pygments` are declared in `[project.dependencies]`.
+package). Python deps `pillow`/`pygments` are declared in `[project.dependencies]`;
+`piper-tts` is an optional extra (`pip install snippet-cast[piper]`) since it
+isn't published on conda-forge — kept out of the hard deps so the conda-forge
+build's auto-mirrored `run:` requirements don't break.
 
 ```bash
 # environment (pixi is this project's env manager)
@@ -136,7 +139,8 @@ combinations:
 A backend is any `synth(text, out_stem) -> path_to_audio_file`; `make_clip`
 re-encodes whatever it returns, so the container/rate don't matter. Registered
 in the `BACKENDS` dict: `say` (macOS), `silent` (timing stand-in), `piper`
-(local, `pip install piper-tts` or the `piper` pixi optional-dependency group),
+(local, `pip install snippet-cast[piper]` or bare `pip install piper-tts`;
+voices need a one-time `python -m piper.download_voices <voice>`),
 `elevenlabs` (REST via stdlib urllib). Config and setup live in **SETUP.md**.
 Note: `build()` **caches audio per unique narration string** — matters for
 ElevenLabs billing and for repeated loop lines.

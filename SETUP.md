@@ -27,25 +27,37 @@ pip install piper-tts
 
 Works on Linux, macOS, Windows, and Raspberry Pi. If `pip` installs into a
 managed environment, prefer your project env (you use pixi) or a venv on Python
-3.10–3.12. Verify it's on your PATH:
+3.10–3.12.
+
+### 2. Download a voice
+
+As of `piper-tts` 1.5.0 (the OHF-Voice/piper1-gpl rewrite), the `piper` CLI
+**does not auto-download voices** — fetch one explicitly first:
+
+```bash
+python -m piper.download_voices en_US-lessac-medium
+```
+
+This drops `en_US-lessac-medium.onnx` and `.onnx.json` into the current
+directory (pass `--download-dir ~/piper-voices` to put them somewhere else).
+Voices are named `<lang>_<REGION>-<name>-<quality>`, e.g. `en_US-lessac-medium`.
+Quality tiers: `x_low`/`low` (16 kHz) and `medium`/`high` (22.05 kHz). `medium`
+is the sweet spot for screencasts. Browse and listen at the Piper voice-samples
+page (linked from the project's README). List every available voice name with:
+
+```bash
+python -m piper.download_voices
+```
+
+Once downloaded, verify it's on your PATH:
 
 ```bash
 echo "hello world" | piper --model en_US-lessac-medium --output_file test.wav
 ```
 
-The first run downloads the named voice from Hugging Face; after that it's fully
-offline.
-
-### 2. Pick a voice
-
-Voices are named `<lang>_<REGION>-<name>-<quality>`, e.g. `en_US-lessac-medium`.
-Quality tiers: `x_low`/`low` (16 kHz) and `medium`/`high` (22.05 kHz). `medium`
-is the sweet spot for screencasts. Browse and listen at the Piper voice-samples
-page (linked from the project's README), then either:
-
-- **let Piper fetch it** — just pass the name (auto-download on first use), or
-- **download it yourself** — grab the `.onnx` **and** its `.onnx.json` config
-  (they must sit side by side) and point `PIPER_MODEL` at the `.onnx` path.
+(If you downloaded to a directory other than the current one, add
+`--data-dir ~/piper-voices` so `piper` can find it.) After this one-time
+download, synthesis is fully offline.
 
 ### 3. Run it
 
@@ -57,10 +69,10 @@ snippet-cast fib.py -o out.mp4 --tts piper
 Configure via environment variables:
 
 ```bash
-export PIPER_MODEL=en_GB-alba-medium      # any voice name …
+export PIPER_MODEL=en_GB-alba-medium      # any downloaded voice name …
 export PIPER_MODEL=/voices/en_US-lessac-medium.onnx   # … or a local .onnx path
 export PIPER_LENGTH_SCALE=1.1             # speaking rate: >1 slower, <1 faster
-export PIPER_DATA_DIR=~/piper-voices      # where voices live / download to
+export PIPER_DATA_DIR=~/piper-voices      # where you downloaded voices to (must match --download-dir above)
 export PIPER_BIN=/opt/piper/piper         # if the binary isn't just "piper"
 snippet-cast fib.py -o out.mp4 --tts piper
 ```
@@ -73,7 +85,7 @@ snippet-cast fib.py -o out.mp4 --tts piper
 | Symptom | Fix |
 |---|---|
 | `piper not found` | Not on PATH. Set `PIPER_BIN`, or reinstall into the active env. |
-| Long pause on first line | It's downloading the voice. Later runs are instant and offline. |
+| `Unable to find voice: ... (use piper.download_voices)` | Voice hasn't been downloaded, or `PIPER_DATA_DIR` doesn't match the `--download-dir` you used. Run `python -m piper.download_voices <voice>`. |
 | `.onnx.json` error with a local model | The config file must sit next to the `.onnx` with the same base name. |
 | Odd Python errors on install | Some distros ship an incompatible Python; use a clean venv/pixi env (3.10–3.12). |
 

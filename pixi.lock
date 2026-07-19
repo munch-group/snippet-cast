@@ -7876,13 +7876,13 @@ packages:
   timestamp: 1762941572482
 - pypi: ./
   name: snippet-cast
-  version: 0.1.16
-  sha256: 6f373b9f00d7eee7047556e0cdc0b8a51623e65e3098d30e32539af438c72891
+  version: 0.1.18
+  sha256: 2b77678c87fc0567663aef094ccc7b7a9bc7c2d98a7ef5e22c39cbfefe49f55e
   requires_dist:
   - pillow
   - pygments
-  - piper-tts ; extra == 'piper'
-  requires_python: '>=3.10,<3.14'
+  - piper-tts>=1.5.0,<2 ; extra == 'piper'
+  requires_python: '>=3.10,<3.15'
   editable: true
 - conda: https://conda.anaconda.org/conda-forge/noarch/soupsieve-2.8-pyhd8ed1ab_0.conda
   sha256: c978576cf9366ba576349b93be1cfd9311c00537622a2f9e14ba2b90c97cae9c

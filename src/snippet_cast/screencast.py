@@ -533,16 +533,20 @@ def synth_silent(text, out):       # timing stand-in; runs anywhere
 def synth_piper(text, out):
     """Local neural TTS via the Piper CLI (`pip install piper-tts`).
 
+    Piper does not auto-download voices; fetch one first:
+        python -m piper.download_voices en_US-lessac-medium
+
     Configure with environment variables:
-      PIPER_MODEL         voice name (auto-downloaded, e.g. en_US-lessac-medium)
-                          or a path to a local .onnx file  [default: en_US-lessac-medium]
+      PIPER_MODEL         voice name (e.g. en_US-lessac-medium) or a path to
+                          a local .onnx file                   [default: en_US-lessac-medium]
       PIPER_LENGTH_SCALE  speaking rate; >1 slower, <1 faster  [default: 1.0]
-      PIPER_BIN           path to the piper binary            [default: "piper"]
-      PIPER_DATA_DIR      where to find/download voices (optional)
+      PIPER_BIN           path to the piper binary             [default: "piper"]
+      PIPER_DATA_DIR      directory to search for the voice's .onnx/.onnx.json;
+                          must match where you downloaded it   [default: cwd]
     """
     if shutil.which(os.environ.get("PIPER_BIN", "piper")) is None:
         sys.exit("piper not found. Install with:  pip install piper-tts\n"
-                 "then set PIPER_MODEL (e.g. en_US-lessac-medium).")
+                 "then fetch a voice: python -m piper.download_voices en_US-lessac-medium")
     model = os.environ.get("PIPER_MODEL", "en_US-lessac-medium")
     wav = out + ".wav"
     cmd = [os.environ.get("PIPER_BIN", "piper"),
@@ -550,12 +554,17 @@ def synth_piper(text, out):
     if os.environ.get("PIPER_LENGTH_SCALE"):
         cmd += ["--length_scale", os.environ["PIPER_LENGTH_SCALE"]]
     if os.environ.get("PIPER_DATA_DIR"):
-        cmd += ["--data-dir", os.environ["PIPER_DATA_DIR"],
-                "--download-dir", os.environ["PIPER_DATA_DIR"]]
+        cmd += ["--data-dir", os.environ["PIPER_DATA_DIR"]]
     proc = subprocess.run(cmd, input=text.encode(),
                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if proc.returncode != 0:
-        sys.exit(f"piper failed: {proc.stderr.decode()[:400]}")
+        err = proc.stderr.decode()
+        if "Unable to find voice" in err:
+            download_dir = os.environ.get("PIPER_DATA_DIR")
+            hint = f" --download-dir {download_dir}" if download_dir else ""
+            sys.exit(f"piper: voice '{model}' not found. Fetch it first:\n"
+                     f"  python -m piper.download_voices {model}{hint}")
+        sys.exit(f"piper failed: {err[:400]}")
     return wav
 
 
