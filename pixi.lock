@@ -7876,8 +7876,8 @@ packages:
   timestamp: 1762941572482
 - pypi: ./
   name: snippet-cast
-  version: 0.1.18
-  sha256: 2b77678c87fc0567663aef094ccc7b7a9bc7c2d98a7ef5e22c39cbfefe49f55e
+  version: 0.1.19
+  sha256: d392670e331a12f2ef61a0698d56357ed5a1372707552b88a953fdf72e3bc524
   requires_dist:
   - pillow
   - pygments
