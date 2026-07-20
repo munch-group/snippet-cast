@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "snippet-cast"
-version = "0.1.26"
+version = "0.1.27"
 description = "Turn annotated Python snippets into narrated screencast videos."
 authors = [
     {name = "Kasper Munch", email = "kaspermunch@birc.au.dk"}
