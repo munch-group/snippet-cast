@@ -11,9 +11,11 @@ from snippet_cast.screencast import (
     Beat,
     _format_script,
     _mono_font_path,
+    _parse_order,
     _two_pass_beats,
     build_beats,
     loop_body_ranges,
+    order_markers,
     parse,
     split_narration,
     trace_run,
@@ -138,6 +140,87 @@ def test_export_script_matches_two_pass_beat_count():
 def test_two_pass_rejects_every():
     with pytest.raises(SystemExit):
         export_script(str(TWOPASS), every=True)
+
+
+def test_parse_order_strips_prefix_or_returns_none():
+    assert _parse_order("3) Some text") == (3, "Some text")
+    assert _parse_order("10)   Some text") == (10, "Some text")
+    assert _parse_order("Some text") == (None, "Some text")
+    assert _parse_order("") == (None, "")
+
+
+def test_order_markers_defaults_to_source_order_when_unnumbered():
+    source = FIB.read_text()
+    _, markers = parse(source)
+    out = order_markers(markers, [m.text for m in markers])
+    assert [m.line_no for m in out] == [m.line_no for m in markers]
+    assert [m.text for m in out] == [m.text for m in markers]
+
+
+def test_order_markers_reorders_by_explicit_numbers():
+    source = (
+        "def fib(n):             #: 3) def line\n"
+        "    a, b = 0, 1          #: 1) init line\n"
+        "    for _ in range(n):   #: 2) loop line\n"
+    )
+    _, markers = parse(source)
+    out = order_markers(markers, [m.text for m in markers])
+    assert [m.line_no for m in out] == [2, 3, 1]
+    assert [m.text for m in out] == ["init line", "loop line", "def line"]
+
+
+def test_order_markers_rejects_mixed_numbering():
+    source = (
+        "def fib(n):    #: 1) def line\n"
+        "    a = 1      #: init line\n"
+    )
+    _, markers = parse(source)
+    with pytest.raises(SystemExit):
+        order_markers(markers, [m.text for m in markers])
+
+
+def test_build_beats_reveal_upto_never_shrinks_for_reordered_markers():
+    source = (
+        "def fib(n):             #: 3) def line\n"
+        "    a = n                #: 1) init line\n"
+        "    b = a + 1            #: 2) plus one line\n"
+    )
+    code_lines, markers = parse(source)
+    steps = trace_run(source, "<reorder-test>")
+    ordered = order_markers(markers, [m.text for m in markers])
+    beats = build_beats(code_lines, ordered, steps, every=False)
+
+    reveal = [b.reveal_upto for b in beats]
+    assert reveal == sorted(reveal)              # non-decreasing, never shrinks
+    assert [b.highlight for b in beats] == [2, 3, 1]
+    assert reveal[-1] == 3                        # final beat has revealed everything
+
+
+def test_two_pass_beats_supports_independent_per_pass_order():
+    source = (
+        "def counter(n):       #: 2) sig / whole thing\n"
+        "    total = 0         #: 1) start / total is {total}\n"
+        "    return total      #: 3) ret / return it\n"
+    )
+    code_lines, markers = parse(source)
+    steps = trace_run(source, "<reorder-twopass-test>")
+    beats1, beats2 = _two_pass_beats(code_lines, markers, steps)
+
+    # pass 1 is explicitly reordered: line 2, then line 1, then line 3
+    assert [b.highlight for b in beats1] == [2, 1, 3]
+    # pass 2 has no numbers anywhere -> default top-to-bottom order
+    assert [b.highlight for b in beats2] == [1, 2, 3]
+
+
+def test_build_rejects_order_prefixes_with_every(tmp_path):
+    src = tmp_path / "ordered.py"
+    src.write_text(
+        "def fib(n):             #: 3) def line\n"
+        "    a = n                #: 1) init line\n"
+        "    b = a + 1            #: 2) plus one line\n"
+    )
+    with pytest.raises(SystemExit):
+        export_script(str(src), every=True)
 
 
 @pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")

@@ -39,16 +39,38 @@ with a ``/``:
     def fib(n):    #: We're about to write fib. / fib takes one argument, n.
 
 If ANY marker in the file uses ``/``, the whole video becomes two full,
-sequential passes: pass 1 types the entire snippet in from scratch, narrating
-each line with the text BEFORE ``/`` as it's typed (no state panel, no
-highlight — nothing has executed yet); pass 2 then plays the existing
-walkthrough again from the top (progressive reveal, highlight, state panel),
-narrating with the text AFTER ``/`` — identical to single-pass mode. Either
-side may be empty: an empty writing-pass text still types the line in,
-silently; an empty walkthrough-pass text still reveals/highlights the line,
-holding briefly with no narration. A file with no ``/`` anywhere is
-unaffected — --typing/--typing-speed keep controlling that single pass as
-before. Not supported together with --every.
+sequential passes: pass 1 opens on a blank canvas and types the entire
+snippet in from scratch, narrating each line with the text BEFORE ``/`` as
+it's typed (no state panel, no highlight — nothing has executed yet); pass 2
+then walks back through the same snippet from the top, narrating with the
+text AFTER ``/`` — but the code pass 1 already typed stays fully on screen
+throughout pass 2 (it is not hidden and re-revealed line by line); only the
+highlight and state panel move, beat by beat. Either side may be empty: an
+empty writing-pass text still types the line in, silently; an empty
+walkthrough-pass text still highlights the line, holding briefly with no
+narration. A file with no ``/`` anywhere is unaffected —
+--typing/--typing-speed keep controlling that single pass as before. Not
+supported together with --every.
+
+CUSTOM NARRATION ORDER: give a ``#:`` line's narration a leading ``N)`` to
+narrate/highlight it out of source-line order:
+
+    def fib(n):          #: 3) We define fib, taking one argument, n.
+        a, b = 0, 1      #: 1) Start from the first two Fibonacci numbers.
+        for _ in range(n):  #: 2) Loop n times.
+
+plays "Start...", "Loop...", "We define fib..." in that order, while the code
+itself only ever reveals forward (jumping ahead to a later line reveals
+everything up to it; a later beat for an earlier line just re-highlights code
+already on screen). Numbering is per pass in two-pass narration — each side of
+the ``/`` has its own independent order:
+
+    def fib(n):    #: 1) writing-pass order / 2) walkthrough-pass order
+
+Leave a side without any ``N)`` prefixes to keep it in default top-to-bottom
+order; a pass may not mix numbered and unnumbered lines. Not supported
+together with --every (there, beat order already follows execution, not
+marker order).
 
 MANUAL RECORDING WORKFLOW: instead of a TTS backend, you can narrate a
 snippet in your own voice. `--export-script` prints the exact ordered,
@@ -326,6 +348,41 @@ def split_narration(text):
     return "", text.strip()
 
 
+_ORDER_RE = re.compile(r"^(\d+)\)\s*")
+
+
+def _parse_order(text):
+    """Strip a leading 'N) ' playback-order prefix from one pass's narration
+    text. Returns (order:int|None, text) — None when `text` has no prefix
+    (an empty string, e.g. an unused pass1 slot, also has no prefix)."""
+    m = _ORDER_RE.match(text)
+    if not m:
+        return None, text
+    return int(m.group(1)), text[m.end():].strip()
+
+
+def order_markers(markers, texts):
+    """Pair `markers` with parallel per-pass `texts` (post split_narration()
+    for two-pass, or each marker's whole text for single-pass), strip any
+    leading 'N) ' order prefix, and return new Markers (same line_no/has_code,
+    text replaced by the stripped text) in PLAYBACK order.
+
+    If every text in this pass carries a prefix, markers are sorted by that
+    number (stable, so ties keep source order); if none do, markers are left
+    in their given (source-line) order — today's default. A pass may not mix
+    numbered and unnumbered lines — that's ambiguous, so it's a hard error."""
+    parsed = [_parse_order(t) for t in texts]
+    orders = [o for o, _ in parsed]
+    numbered = [o is not None for o in orders]
+    if any(numbered) and not all(numbered):
+        sys.exit("Mix of numbered ('N) ...') and unnumbered '#:' narration in "
+                 "one pass — number either all lines in that pass or none.")
+    out = [Marker(m.line_no, t, m.has_code) for m, (_, t) in zip(markers, parsed)]
+    if all(numbered):
+        out = [m for _, m in sorted(zip(orders, out), key=lambda p: p[0])]
+    return out
+
+
 def _mono_font_path():
     """First existing path from _FONT_CANDIDATES, or None."""
     for path in _FONT_CANDIDATES:
@@ -406,16 +463,20 @@ def build_beats(code_lines, markers, steps, every, loop_ranges=None):
         for st in steps:
             first.setdefault(st.line_no, st)
         beats = []
+        revealed = 0   # high-water mark: markers may be given out of source
+                        # order (see order_markers), so code only ever grows —
+                        # never truncates what an earlier beat already showed.
         for m in markers:
+            revealed = max(revealed, m.line_no)
             if m.has_code:
                 st = first.get(m.line_no)
                 beats.append(Beat(
-                    reveal_upto=m.line_no, highlight=m.line_no,
+                    reveal_upto=revealed, highlight=m.line_no,
                     narration=interpolate(m.text, st.text if st else {}),
                     state=st.disp if st else {}))
             else:
                 beats.append(Beat(
-                    reveal_upto=m.line_no, highlight=None,
+                    reveal_upto=revealed, highlight=None,
                     narration=interpolate(m.text, env_before(m.line_no)),
                     state={}))
         return beats
@@ -454,9 +515,18 @@ def _two_pass_beats(code_lines, markers, steps):
     sequences via the unmodified build_beats(): pass 1 ('writing') gets
     steps=[] so every beat's state is {} and {var} fields are left literal
     (nothing has executed yet); pass 2 ('walkthrough') gets the real steps,
-    identical to today's single-pass first-exec mechanics."""
-    m1 = [Marker(m.line_no, split_narration(m.text)[0], m.has_code) for m in markers]
-    m2 = [Marker(m.line_no, split_narration(m.text)[1], m.has_code) for m in markers]
+    same per-beat highlight/state/narration as single-pass first-exec mode.
+    (_render_two_pass() ignores each beat's reveal_upto when rendering pass 2,
+    since pass 1 already typed the code onto the canvas — only highlight and
+    state move.)
+
+    Each pass may independently carry a leading 'N) ' order prefix on every
+    one of its texts (order_markers()) — e.g. '#: 1) text / 4) text' — to
+    narrate that pass out of source-line order; a bare '#: text / 4) text'
+    leaves pass 1 in default (top-to-bottom) order while pass 2 is reordered."""
+    parts = [split_narration(m.text) for m in markers]
+    m1 = order_markers(markers, [p[0] for p in parts])
+    m2 = order_markers(markers, [p[1] for p in parts])
     beats1 = build_beats(code_lines, m1, steps=[], every=False)
     beats2 = build_beats(code_lines, m2, steps=steps, every=False)
     return beats1, beats2
@@ -583,6 +653,11 @@ def typing_frames(cv, base_lines, new_lines, state, caption_lines, outdir, tag,
     instead). `reach_full`, if True, makes the LAST frame show the complete
     `new_lines` text instead of stopping just short of it — used when no
     separate hold-at-100% frame follows (unlike legacy --typing).
+
+    When `base_lines` is empty — nothing is on screen yet, i.e. this is the
+    very start of the recording — frame 0 shows a blank canvas (0 characters)
+    and the count ramps up to the same end point the non-blank case reaches,
+    instead of jumping straight to 1+ characters already typed.
     """
     stream = "\n".join(new_lines)
     total = len(stream)
@@ -590,13 +665,20 @@ def typing_frames(cv, base_lines, new_lines, state, caption_lines, outdir, tag,
         return []
     if n_frames is None:
         n_frames = min(TYPE_MAXFRAMES, max(1, round(total * typing_speed * FPS)))
-    denom = n_frames if reach_full else n_frames + 1
     base = "\n".join(base_lines)
+    start_blank = not base
+    if start_blank:
+        n_frames = max(n_frames, 2)   # need >=2 frames to ramp from 0 to end_frac
+    end_frac = 1.0 if reach_full else n_frames / (n_frames + 1)
     sub = os.path.join(outdir, f"type_{tag}")
     os.makedirs(sub, exist_ok=True)
     frames = []
     for i in range(n_frames):                # stop before full (hold shows full)
-        m = max(1, round((i + 1) * total / denom))
+        if start_blank:
+            m = round((i / (n_frames - 1)) * end_frac * total)
+        else:
+            denom = n_frames if reach_full else n_frames + 1
+            m = max(1, round((i + 1) * total / denom))
         typed = stream[:m]
         code = (base + "\n" + typed) if base else typed
         frames.append(compose(cv, code, [], state, caption_lines,
@@ -875,10 +957,13 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
         print(f"  [pass1 {k+1}/{len(beats1)}] {beat.narration[:60] or '(silent)'}")
 
     off = len(beats1)
+    # Pass 1 already typed everything up to the last marked line — pass 2
+    # keeps that code on screen throughout instead of re-hiding and
+    # progressively re-revealing it; only the highlight/state panel move.
+    final_upto = beats1[-1].reveal_upto
     for k, beat in enumerate(beats2):
         caption = cv.captions[off + k] if cv.captions is not None else None
-        n = beat.reveal_upto if beat.reveal_upto is not None else len(code_lines)
-        hold = compose(cv, "\n".join(code_lines[:n]),
+        hold = compose(cv, "\n".join(code_lines[:final_upto]),
                        [beat.highlight] if beat.highlight else [],
                        beat.state, caption, os.path.join(work, f"p2_hold_{k:03d}.png"))
         clip = os.path.join(work, f"p2_clip_{k:03d}.mp4")
@@ -986,6 +1071,11 @@ def build(source_path, out_path, tts, trace=True, every=False,
     if two_pass and typing:
         print("note: --typing has no effect in two-pass mode ('/' in a "
               "marker) — the writing pass always types the new code in.")
+    if not two_pass:
+        if every and any(_parse_order(m.text)[0] is not None for m in markers):
+            sys.exit("Numbered 'N) ' order prefixes require first-exec mode; "
+                     "drop --every or remove the prefixes.")
+        markers = order_markers(markers, [m.text for m in markers])
 
     steps = trace_run(source, source_path) if trace else []
     work = tempfile.mkdtemp(prefix="screencast_")
@@ -1105,6 +1195,11 @@ def export_script(source_path, trace=True, every=False):
     if two_pass and every:
         sys.exit("Two-pass narration ('/' in a marker) isn't supported with "
                  "--every; remove the '/' or drop --every.")
+    if not two_pass:
+        if every and any(_parse_order(m.text)[0] is not None for m in markers):
+            sys.exit("Numbered 'N) ' order prefixes require first-exec mode; "
+                     "drop --every or remove the prefixes.")
+        markers = order_markers(markers, [m.text for m in markers])
     steps = trace_run(source, source_path) if trace else []
     if two_pass:
         beats1, beats2 = _two_pass_beats(code_lines, markers, steps)

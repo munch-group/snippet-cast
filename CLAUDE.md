@@ -114,12 +114,40 @@ which calls the *unmodified* `build_beats()` **twice**: once with
 `steps=[]` (part1 text; forces `state={}` everywhere, since `first.get(...)`
 always misses) for **pass 1** ("writing" — always typed, via
 `make_pass1_code_clip()`/`probe_duration()`, narration and typing start
-together and the clip is sized to the narration's real duration), and once
-with the real `steps` (part2 text) for **pass 2** ("walkthrough" — identical
-mechanics to today's single-pass first-exec mode). `_render_two_pass()`
+together, opening on a blank canvas (`typing_frames()`'s `start_blank` path),
+and the clip is sized to the narration's real duration), and once with the
+real `steps` (part2 text) for **pass 2** ("walkthrough" — same per-beat
+highlight/state/narration as single-pass first-exec mode, but
+`_render_two_pass()` deliberately ignores each beat's `reveal_upto` here and
+always composes the full code pass 1 already typed (`code_lines[:final_upto]`,
+`final_upto = beats1[-1].reveal_upto`) — only the highlight and state panel
+move per beat; the code is never hidden and re-revealed). `_render_two_pass()`
 renders all of pass 1 then all of pass 2, concatenated into one video. A file
 with no `/` anywhere never takes this branch — the original single-pass loop
 in `build()` is untouched, so behavior for existing snippets doesn't change.
+
+#### Custom narration order (first-exec only, orthogonal to two-pass)
+
+Any marker's (post-`split_narration()`) text may carry a leading `N)` —
+`_parse_order()` strips it, returning `(order, text)` or `(None, text)` if
+absent. `order_markers(markers, texts)` pairs markers with their per-pass
+texts, requires **all-or-none** numbering within that pass (`sys.exit` on a
+mix), and — only when every text is numbered — sorts the markers by that
+number (stable sort; unnumbered passes are left in source order, today's
+default). `build()`/`export_script()` call it once for single-pass mode
+(texts = each marker's whole `.text`); `_two_pass_beats()` calls it twice,
+once per split-off pass, so pass 1 and pass 2 can use independent orders.
+Because the returned `Marker` list is just fed into the unmodified
+`build_beats()` in playback order, `build_beats()` itself needed only one
+change to support this: `reveal_upto` is now a running **high-water mark**
+(`max` of `m.line_no` seen so far in iteration order) instead of `m.line_no`
+directly — code can only ever grow into view, so jumping ahead to narrate a
+later line first reveals everything up to it, and a later beat for an
+earlier line just re-highlights code that's already on screen. Rejected
+together with `--every` (there, beat order already follows the execution
+trace, not marker order, so reordering markers would have no effect on code
+beats and would silently desync the every-mode comment-slotting logic, which
+assumes `comment_marks` stays in ascending line order).
 
 ### Critical invariants — do not break these
 
@@ -164,6 +192,12 @@ combinations:
     only ever trims a sliver of excess video — it must never truncate real
     narration. Only the *silent* (empty part1) sub-case is capped by
     `TYPE_MAXFRAMES`; the narrated sub-case is deliberately uncapped.
+11. **`reveal_upto` in first-exec mode is a running high-water mark, not
+    `m.line_no`** (`build_beats()`'s `not every` branch). This is what lets
+    `order_markers()` narrate lines out of source order without ever erasing
+    code an earlier beat already showed — don't revert it to a direct
+    `m.line_no` assignment, even though that's a no-op for the common
+    (unordered, already-ascending) case.
 
 ### TTS backends
 
@@ -244,6 +278,9 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   first-exec only, auto-detected, no flag needed. `TWO_PASS_SEP` changes the
   separator character; `PART2_EMPTY_HOLD` is how long the walkthrough pass
   holds a beat whose part2 text is empty.
+- **Custom narration order:** add a leading `N)` to a `#:` narration
+  (`_parse_order`/`order_markers`, `_ORDER_RE`); first-exec only, per-pass in
+  two-pass mode, no flag needed — all-or-none per pass, else `sys.exit`.
 - **Manual-recording tooling:** `--export-script` (`export_script()` /
   `_format_script()`) and `--tts manual` (`make_manual_backend()`) — see the
   "Two-pass narration" architecture note above for how their numbering stays
