@@ -47,6 +47,30 @@ from snippet_cast import build
 build("snippet.py", "out.mp4", tts="silent", subtitles=True)
 ```
 
+Or in a Jupyter notebook — write the snippet directly in a cell instead of a
+separate `.py` file:
+
+```
+pip install snippet-cast[jupyter]
+```
+
+```
+%load_ext snippet_cast.magic
+```
+
+```
+%%snippet-cast -o out.mp4 --tts silent --subtitles
+def fib(n):             #: We define fib, taking one argument, n.
+    a, b = 0, 1          #: Start from the first two Fibonacci numbers.
+    for _ in range(n):   #: Loop n times.
+        a, b = b, a + b  #: Advance the pair; b becomes the running sum.
+    return a             #: Return a — the nth Fibonacci number.
+result = fib(7)          #: Call fib with seven; result becomes {result}.
+```
+
+The cell magic takes the same flags as the CLI and displays the rendered MP4
+inline.
+
 See [SETUP.md](SETUP.md) for configuring the Piper (local) and ElevenLabs
 (cloud) text-to-speech backends, and `snippet-cast --help` for all options.
 

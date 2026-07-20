@@ -34,6 +34,8 @@ pixi run snippet-cast test/data/fib.py  -o out.mp4 --tts silent --subtitles
 pixi run snippet-cast test/data/fib.py  -o out.mp4 --typing --subtitles      # first-exec + typing
 pixi run snippet-cast test/data/loop.py -o out.mp4 --every  --subtitles      # per-iteration walkthrough
 pixi run snippet-cast test/data/fib.py  -o out.mp4 --no-trace                # code + highlight only
+pixi run snippet-cast test/data/twopass.py -o out.mp4 --tts silent --subtitles   # two-pass ('/' in narration)
+pixi run snippet-cast test/data/twopass.py --export-script                      # narration script to record
 
 # real voices (see SETUP.md)
 pixi run snippet-cast test/data/fib.py  -o out.mp4 --tts piper
@@ -58,9 +60,10 @@ manual recipe used to sanity-check rendered video output.
 | Path | Purpose |
 |---|---|
 | `src/snippet_cast/screencast.py` | The entire tool (~700 lines): parse → trace → beats → render → TTS → assemble. |
-| `src/snippet_cast/__init__.py` | Public API: exports `build` (programmatic) and `main` (CLI entry point). |
+| `src/snippet_cast/__init__.py` | Public API: exports `build` (programmatic), `export_script`, and `main` (CLI entry point). |
+| `src/snippet_cast/magic.py` | Jupyter `%%snippet-cast` cell magic (`pip install snippet-cast[jupyter]`, `%load_ext snippet_cast.magic`). Deliberately **not** imported from `__init__.py`, so `import snippet_cast` never requires IPython — it's a thin wrapper: writes the cell to a temp `.py` file, calls `build()`/`export_script()`, displays the result with `IPython.display.Video`. |
 | `SETUP.md` | How to install/configure the Piper and ElevenLabs TTS backends. |
-| `test/data/fib.py`, `test/data/loop.py` | Sample annotated snippets used by tests and for manual verification. |
+| `test/data/fib.py`, `test/data/loop.py`, `test/data/twopass.py` | Sample annotated snippets used by tests and for manual verification (`twopass.py` exercises `/`-split, two-pass narration). |
 | `test/test_screencast.py` | Automated tests: parsing, tracing, beat construction, and a full-render smoke test. |
 | `*.mp4` | Generated outputs (not source; safe to delete / gitignore). |
 
@@ -102,6 +105,22 @@ Key data structures:
   the highlight follows execution (progressive reveal is intentionally disabled
   here — a bottom driver call would otherwise make the reveal jump around).
 
+#### Two-pass narration (orthogonal to the above, first-exec only)
+
+`split_narration(text)` splits a `#:` narration on the first `/` into
+`(part1, part2)`. If **any** marker's raw text contains `/`, `build()` takes an
+early branch (`build()`'s `two_pass` flag) that calls `_two_pass_beats()` —
+which calls the *unmodified* `build_beats()` **twice**: once with
+`steps=[]` (part1 text; forces `state={}` everywhere, since `first.get(...)`
+always misses) for **pass 1** ("writing" — always typed, via
+`make_pass1_code_clip()`/`probe_duration()`, narration and typing start
+together and the clip is sized to the narration's real duration), and once
+with the real `steps` (part2 text) for **pass 2** ("walkthrough" — identical
+mechanics to today's single-pass first-exec mode). `_render_two_pass()`
+renders all of pass 1 then all of pass 2, concatenated into one video. A file
+with no `/` anywhere never takes this branch — the original single-pass loop
+in `build()` is untouched, so behavior for existing snippets doesn't change.
+
 ### Critical invariants — do not break these
 
 These are non-obvious and fail *silently* or only under specific flag
@@ -133,6 +152,18 @@ combinations:
 8. **Interpolation uses `str(value)` snapshotted at capture time** (not `repr`,
    not a live reference) so `{i}` → `0` not `'0'`, and mutation/aliasing can't
    corrupt earlier beats. `{{`/`}}` escape; unknown `{x}` is left literal.
+9. **Two-pass mode is auto-detected, never forced.** `build()`/`export_script()`
+   check `any(TWO_PASS_SEP in m.text for m in markers)` — a file with no `/`
+   anywhere must render exactly as it did before this feature existed. Don't
+   thread two-pass-only conditionals into the legacy single-pass loop; keep
+   the two code paths separate (see `_render_two_pass()` vs. the loop at the
+   end of `build()`).
+10. **A pass-1 "writing" clip's video is never shorter than its narration
+    audio.** `make_pass1_code_clip()` sizes frame count from
+    `ceil(duration * FPS)` (rounding up), so `make_typing_clip`'s `-shortest`
+    only ever trims a sliver of excess video — it must never truncate real
+    narration. Only the *silent* (empty part1) sub-case is capped by
+    `TYPE_MAXFRAMES`; the narrated sub-case is deliberately uncapped.
 
 ### TTS backends
 
@@ -141,9 +172,17 @@ re-encodes whatever it returns, so the container/rate don't matter. Registered
 in the `BACKENDS` dict: `say` (macOS), `silent` (timing stand-in), `piper`
 (local, `pip install snippet-cast[piper]` or bare `pip install piper-tts`;
 voices need a one-time `python -m piper.download_voices <voice>`),
-`elevenlabs` (REST via stdlib urllib). Config and setup live in **SETUP.md**.
-Note: `build()` **caches audio per unique narration string** — matters for
-ElevenLabs billing and for repeated loop lines.
+`elevenlabs` (REST via stdlib urllib), `manual` (your own recordings —
+`BACKENDS["manual"]` is `None`, a placeholder just so `--tts manual` shows up
+in argparse's choices; `build()` special-cases `tts == "manual"` and builds a
+real `synth` via `make_manual_backend(manual_audio_dir)`, a closure that
+serves `001.wav, 002.wav, ...` in call order). Config and setup live in
+**SETUP.md**. Note: `build()` **caches audio per unique narration string** —
+matters for ElevenLabs billing, for repeated loop lines, and for keeping the
+manual backend's file-numbering aligned with `export_script()`'s (see
+`_cached_synth()`/`_format_script()` — both dedup on the exact same
+first-seen-narration-text rule, so the Nth unique line in the exported script
+is always the Nth call to the manual backend).
 
 ### Verifying changes
 
@@ -159,6 +198,10 @@ ffmpeg -y -ss 2 -i /tmp/b.mp4 -frames:v 1 /tmp/frame.png   # inspect visually
 pixi run python -m pytest -q                               # automated checks
 ```
 
+`test/test_magic.py` covers the `%%snippet-cast` cell magic via
+`IPython.testing.globalipapp.get_ipython()` + `run_cell(...)` (no real kernel
+needed); it's skipped automatically if IPython isn't installed.
+
 For trace/interpolation logic, prefer a fast unit check over rendering video:
 
 ```bash
@@ -170,9 +213,11 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
 
 ### Conventions
 
-- **Single file, stdlib-first.** Only third-party deps are Pillow and Pygments;
-  everything else (HTTP for ElevenLabs, AST, tokenize) is stdlib. Keep new deps
-  out unless there's a strong reason.
+- **`screencast.py` is single-file, stdlib-first.** Only hard third-party deps
+  are Pillow and Pygments; everything else (HTTP for ElevenLabs, AST, tokenize)
+  is stdlib. Keep new deps out of this file unless there's a strong reason.
+  `magic.py` is the one deliberate exception — it needs IPython, so it's kept
+  as its own optional module rather than pulled into `screencast.py`.
 - **Tunables are module-level constants** at the top (`MARKER`, `STYLE`, `FONT_*`,
   `FPS`, `TYPE_*`, `AUDIO_*`, colours). Add config there, not as magic numbers.
 - **ffmpeg is called via `subprocess.run`** with stdout/stderr to DEVNULL and
@@ -192,7 +237,23 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   `FONT_NAME` alone, since pygments resolves bare names against the OS's
   installed fonts (e.g. "DejaVu Sans Mono" isn't a stock macOS font).
 - **Change the narration marker:** `MARKER` (keep it a valid `#` comment prefix).
-- **Adjust typing speed:** `TYPE_CPF` (chars/frame), `TYPE_MAXFRAMES` (cap).
+- **Adjust typing speed:** default is `TYPE_SPEED` (seconds/char), overridable
+  per-run with `--typing-speed`; `TYPE_MAXFRAMES` is a safety cap on frames
+  per beat regardless of speed.
+- **Two-pass narration:** add `/` to a `#:` narration (`split_narration`);
+  first-exec only, auto-detected, no flag needed. `TWO_PASS_SEP` changes the
+  separator character; `PART2_EMPTY_HOLD` is how long the walkthrough pass
+  holds a beat whose part2 text is empty.
+- **Manual-recording tooling:** `--export-script` (`export_script()` /
+  `_format_script()`) and `--tts manual` (`make_manual_backend()`) — see the
+  "Two-pass narration" architecture note above for how their numbering stays
+  aligned with `build()`'s own audio-request order.
+- **Jupyter `%%snippet-cast` cell magic:** lives in `src/snippet_cast/magic.py`
+  (`SnippetCastMagics`, loaded via `%load_ext snippet_cast.magic`). It's a thin
+  wrapper — writes the cell body to a temp `.py` file and calls `build()`/
+  `export_script()` unchanged, so new CLI flags/backends need a matching
+  `@argument(...)` added there to be reachable from a notebook, but need no
+  logic changes.
 
 ### Known limitations / candidate next steps
 
@@ -202,6 +263,10 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
 - **Live TTS is untested in CI** (no network in sandbox); the request shapes
   match current Piper CLI / ElevenLabs REST as of the SETUP.md date — re-verify
   against their docs if a call starts failing.
+- **Two-pass narration doesn't combine with `--every`** (both `build()` and
+  `export_script()` exit with an error) and makes `--typing` a no-op (pass 1
+  always types, pass 2 never does) — this mirrors the existing
+  `--typing`+`--every` restriction rather than introducing a new concept.
 
 ## MCP Server Usage Guidelines
 

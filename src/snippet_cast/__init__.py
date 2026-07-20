@@ -1,3 +1,3 @@
-from .screencast import build, main
+from .screencast import build, export_script, main
 
-__all__ = ["build", "main"]
+__all__ = ["build", "export_script", "main"]

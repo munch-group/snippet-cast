@@ -77,8 +77,17 @@ export PIPER_BIN=/opt/piper/piper         # if the binary isn't just "piper"
 snippet-cast fib.py -o out.mp4 --tts piper
 ```
 
-`PIPER_LENGTH_SCALE` is the one you'll actually reach for — Piper can rush, and
-`1.05–1.15` makes a walkthrough much easier to follow.
+…or with the equivalent CLI flags, which take precedence over the environment
+variables above (handy for a one-off run without touching your shell env):
+
+```bash
+snippet-cast fib.py -o out.mp4 --tts piper \
+  --piper-model en_GB-alba-medium --piper-length-scale 1.1 \
+  --piper-data-dir ~/piper-voices --piper-bin /opt/piper/piper
+```
+
+`PIPER_LENGTH_SCALE` / `--piper-length-scale` is the one you'll actually reach
+for — Piper can rush, and `1.05–1.15` makes a walkthrough much easier to follow.
 
 ### Troubleshooting
 
@@ -112,9 +121,20 @@ export ELEVENLABS_MODEL=eleven_multilingual_v2
 export ELEVENLABS_FORMAT=mp3_44100_128
 ```
 
+…or pass the equivalent CLI flags, which take precedence over the environment
+variables above:
+
+```bash
+snippet-cast fib.py -o out.mp4 --tts elevenlabs \
+  --elevenlabs-api-key sk_your_key_here \
+  --elevenlabs-voice-id 21m00Tcm4TlvDq8ikWAM \
+  --elevenlabs-model eleven_multilingual_v2 \
+  --elevenlabs-format mp3_44100_128
+```
+
 To use a different voice, open the Voice Library or your Voices in the
 ElevenLabs app; each voice has an **ID** (e.g. `JBFqnCBsd6RMkjVDRZzb`). Copy the
-ID, not the display name, into `ELEVENLABS_VOICE_ID`.
+ID, not the display name, into `ELEVENLABS_VOICE_ID` / `--elevenlabs-voice-id`.
 
 ### 3. Run it
 
