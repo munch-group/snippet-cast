@@ -59,11 +59,13 @@ narrate/highlight it out of source-line order:
         a, b = 0, 1      #: 1) Start from the first two Fibonacci numbers.
         for _ in range(n):  #: 2) Loop n times.
 
-plays "Start...", "Loop...", "We define fib..." in that order, while the code
-itself only ever reveals forward (jumping ahead to a later line reveals
-everything up to it; a later beat for an earlier line just re-highlights code
-already on screen). Numbering is per pass in two-pass narration — each side of
-the ``/`` has its own independent order:
+plays "Start...", "Loop...", "We define fib..." in that order. Each line
+reveals independently, in whatever order it's visited: only THAT line (and
+any unmarked lines directly above it back to the previous marker) appears;
+every other line stays blank at its own fixed row until its own turn comes,
+so jumping ahead never drags earlier untouched lines along with it and never
+shifts already-revealed code to a different row. Numbering is per pass in
+two-pass narration — each side of the ``/`` has its own independent order:
 
     def fib(n):    #: 1) writing-pass order / 2) walkthrough-pass order
 
@@ -205,7 +207,8 @@ class Marker:
 @dataclass
 class Beat:
     """A render-ready unit: one frame + one narration clip."""
-    reveal_upto: int | None   # show code_lines[:reveal_upto]; None = all lines
+    revealed: frozenset[int] | None   # 1-based source lines visible at this
+                                       # beat (see _visible_code()); None = all lines
     highlight: int | None     # 1-based line to highlight; None = no highlight
     narration: str            # already interpolated
     state: dict               # {name: repr} for the panel (may be empty)
@@ -445,6 +448,35 @@ def loop_body_ranges(source):
     return ranges
 
 
+def _reveal_groups(code_lines, markers):
+    """Map each marker's line_no -> the frozenset of 1-based source lines it
+    is responsible for revealing: itself plus any unmarked lines between it
+    and the previous marker (or the top of the file, for the first marker).
+    Groups partition [1, last marker's line] with no gaps and no overlap, so
+    each marker's beat always has something new to reveal, in ANY playback
+    order (see order_markers()) — unlike a running high-water mark, visiting
+    a later line never drags earlier, not-yet-visited lines along with it.
+    Lines after the last marker are never assigned to a group (never
+    revealed) — unchanged, long-standing behavior."""
+    marked = sorted(m.line_no for m in markers)
+    groups, start = {}, 1
+    for line_no in marked:
+        groups[line_no] = frozenset(range(start, line_no + 1))
+        start = line_no + 1
+    return groups
+
+
+def _visible_code(code_lines, revealed):
+    """Render `code_lines` with every NOT-yet-revealed line blanked out, so
+    a line always renders at its fixed row — revealing lines out of source
+    order never shifts already-visible code up or down. `revealed=None`
+    means "show everything" (every-exec mode)."""
+    if revealed is None:
+        return "\n".join(code_lines)
+    return "\n".join(line if (i + 1) in revealed else ""
+                     for i, line in enumerate(code_lines))
+
+
 def build_beats(code_lines, markers, steps, every, loop_ranges=None):
     loop_ranges = loop_ranges or {}
     code_marks = {m.line_no: m for m in markers if m.has_code}
@@ -462,21 +494,23 @@ def build_beats(code_lines, markers, steps, every, loop_ranges=None):
         first = {}  # line_no -> first Step for that line
         for st in steps:
             first.setdefault(st.line_no, st)
+        groups = _reveal_groups(code_lines, markers)
         beats = []
-        revealed = 0   # high-water mark: markers may be given out of source
-                        # order (see order_markers), so code only ever grows —
-                        # never truncates what an earlier beat already showed.
+        revealed = frozenset()   # markers may be given out of source order
+                                  # (see order_markers) — accumulate whichever
+                                  # groups have been visited so far; a group,
+                                  # once revealed, is never taken away again.
         for m in markers:
-            revealed = max(revealed, m.line_no)
+            revealed = revealed | groups[m.line_no]
             if m.has_code:
                 st = first.get(m.line_no)
                 beats.append(Beat(
-                    reveal_upto=revealed, highlight=m.line_no,
+                    revealed=revealed, highlight=m.line_no,
                     narration=interpolate(m.text, st.text if st else {}),
                     state=st.disp if st else {}))
             else:
                 beats.append(Beat(
-                    reveal_upto=revealed, highlight=None,
+                    revealed=revealed, highlight=None,
                     narration=interpolate(m.text, env_before(m.line_no)),
                     state={}))
         return beats
@@ -516,7 +550,7 @@ def _two_pass_beats(code_lines, markers, steps):
     steps=[] so every beat's state is {} and {var} fields are left literal
     (nothing has executed yet); pass 2 ('walkthrough') gets the real steps,
     same per-beat highlight/state/narration as single-pass first-exec mode.
-    (_render_two_pass() ignores each beat's reveal_upto when rendering pass 2,
+    (_render_two_pass() ignores each beat's `revealed` when rendering pass 2,
     since pass 1 already typed the code onto the canvas — only highlight and
     state move.)
 
@@ -547,7 +581,11 @@ def _render_code(code: str, hl_lines):
         font_name=_mono_font_path() or FONT_NAME, font_size=FONT_SIZE, style=STYLE,
         line_numbers=False, hl_lines=hl_lines, image_pad=0, line_pad=6,
     )
-    png = highlight(code, PythonLexer(), fmt)
+    # stripnl=False: pygments' lexers strip leading/trailing blank lines by
+    # default, which would silently collapse a partially-revealed frame's
+    # leading blank rows (unrevealed lines rendered as "") and shove its
+    # actual content up to row 1 — see _visible_code()/typing_frames().
+    png = highlight(code, PythonLexer(stripnl=False), fmt)
     return Image.open(io.BytesIO(png)).convert("RGB")
 
 
@@ -639,9 +677,13 @@ def compose(cv, code_text, hl_lines, state, caption_lines, path):
     return path
 
 
-def typing_frames(cv, base_lines, new_lines, state, caption_lines, outdir, tag,
-                  typing_speed=TYPE_SPEED, n_frames=None, reach_full=False):
-    """Frames that type `new_lines` char-by-char after `base_lines`. No highlight.
+def typing_frames(cv, code_lines, revealed_before, new_group, state, caption_lines,
+                  outdir, tag, typing_speed=TYPE_SPEED, n_frames=None, reach_full=False):
+    """Frames that type the lines in `new_group` (a sorted, contiguous run of
+    1-based source line numbers — one _reveal_groups() group) into their
+    fixed row positions. Lines in `revealed_before` stay fully shown; every
+    other line stays blank — so typing a group anywhere in the file, in any
+    order, never shifts already-revealed code to a different row. No highlight.
 
     `typing_speed` is the target seconds-per-character; the number of frames
     is derived from that and FPS (capped by TYPE_MAXFRAMES), then the chars
@@ -650,28 +692,29 @@ def typing_frames(cv, base_lines, new_lines, state, caption_lines, outdir, tag,
 
     `n_frames`, if given, overrides the typing_speed-derived frame count
     entirely (two-pass mode sizes frames to a real narration's duration
-    instead). `reach_full`, if True, makes the LAST frame show the complete
-    `new_lines` text instead of stopping just short of it — used when no
+    instead). `reach_full`, if True, makes the LAST frame show the group's
+    complete text instead of stopping just short of it — used when no
     separate hold-at-100% frame follows (unlike legacy --typing).
 
-    When `base_lines` is empty — nothing is on screen yet, i.e. this is the
-    very start of the recording — frame 0 shows a blank canvas (0 characters)
-    and the count ramps up to the same end point the non-blank case reaches,
-    instead of jumping straight to 1+ characters already typed.
+    When `revealed_before` is empty — nothing is on screen yet, i.e. this is
+    the very start of the recording — frame 0 shows a blank canvas (0
+    characters) and the count ramps up to the same end point the non-blank
+    case reaches, instead of jumping straight to 1+ characters already typed.
     """
+    new_lines = [code_lines[i - 1] for i in new_group]
     stream = "\n".join(new_lines)
     total = len(stream)
     if total < 2 or not stream.strip():
         return []
     if n_frames is None:
         n_frames = min(TYPE_MAXFRAMES, max(1, round(total * typing_speed * FPS)))
-    base = "\n".join(base_lines)
-    start_blank = not base
+    start_blank = not revealed_before
     if start_blank:
         n_frames = max(n_frames, 2)   # need >=2 frames to ramp from 0 to end_frac
     end_frac = 1.0 if reach_full else n_frames / (n_frames + 1)
     sub = os.path.join(outdir, f"type_{tag}")
     os.makedirs(sub, exist_ok=True)
+    lo, hi = new_group[0], new_group[-1]
     frames = []
     for i in range(n_frames):                # stop before full (hold shows full)
         if start_blank:
@@ -679,9 +722,17 @@ def typing_frames(cv, base_lines, new_lines, state, caption_lines, outdir, tag,
         else:
             denom = n_frames if reach_full else n_frames + 1
             m = max(1, round((i + 1) * total / denom))
-        typed = stream[:m]
-        code = (base + "\n" + typed) if base else typed
-        frames.append(compose(cv, code, [], state, caption_lines,
+        typed_rows = stream[:m].split("\n")
+        rows = []
+        for row_no, line in enumerate(code_lines, start=1):
+            if row_no in revealed_before:
+                rows.append(line)
+            elif lo <= row_no <= hi:
+                idx = row_no - lo
+                rows.append(typed_rows[idx] if idx < len(typed_rows) else "")
+            else:
+                rows.append("")
+        frames.append(compose(cv, "\n".join(rows), [], state, caption_lines,
                               os.path.join(sub, f"{i:03d}.png")))
     return frames
 
@@ -870,29 +921,30 @@ def make_typing_clip(frames_dir, n_frames, out, audio=None):
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def make_pass1_code_clip(cv, base_lines, new_lines, caption_lines, duration,
-                         outdir, tag, audio=None):
-    """One pass-1 'writing' clip: types `new_lines` in after `base_lines`,
-    reaching 100% typed on the last frame (two-pass mode has no separate
-    hold-at-100% frame after typing), muxed with `audio` (real narration) or
-    silent if `audio` is None. `duration` paces the typing: real audio
-    length when `audio` is given (frame count is NOT capped by
-    TYPE_MAXFRAMES — narration audio must never be truncated), else
-    `len(new_lines joined) * typing_speed` when writing silently (capped by
-    TYPE_MAXFRAMES, same safety valve as legacy --typing). Frame count is
-    ceil(duration * FPS) so the clip is never shorter than `audio`;
-    make_typing_clip's -shortest then trims at most one frame of excess
-    video, never truncating narration. Returns None if `new_lines` has < 2
-    characters (nothing worth animating — caller falls back to a static
-    hold)."""
-    stream = "\n".join(new_lines)
+def make_pass1_code_clip(cv, code_lines, revealed_before, new_group, caption_lines,
+                         duration, outdir, tag, audio=None):
+    """One pass-1 'writing' clip: types the lines in `new_group` into their
+    row positions (lines in `revealed_before` stay shown, everything else
+    stays blank — see typing_frames()), reaching 100% typed on the last
+    frame (two-pass mode has no separate hold-at-100% frame after typing),
+    muxed with `audio` (real narration) or silent if `audio` is None.
+    `duration` paces the typing: real audio length when `audio` is given
+    (frame count is NOT capped by TYPE_MAXFRAMES — narration audio must
+    never be truncated), else `len(group's lines joined) * typing_speed`
+    when writing silently (capped by TYPE_MAXFRAMES, same safety valve as
+    legacy --typing). Frame count is ceil(duration * FPS) so the clip is
+    never shorter than `audio`; make_typing_clip's -shortest then trims at
+    most one frame of excess video, never truncating narration. Returns
+    None if the group's joined text has < 2 characters (nothing worth
+    animating — caller falls back to a static hold)."""
+    stream = "\n".join(code_lines[i - 1] for i in new_group)
     if len(stream) < 2 or not stream.strip():
         return None
     frames_target = duration * FPS
     if audio is None:
         frames_target = min(TYPE_MAXFRAMES, frames_target)
     n_frames = max(1, math.ceil(frames_target))
-    frames = typing_frames(cv, base_lines, new_lines, {}, caption_lines,
+    frames = typing_frames(cv, code_lines, revealed_before, new_group, {}, caption_lines,
                            outdir, tag, n_frames=n_frames, reach_full=True)
     if not frames:
         return None
@@ -928,11 +980,11 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
     """Render two-pass mode's clips and return the ordered clip-path list
     (all of pass 1, then all of pass 2) ready for concat()."""
     clips = []
-    prev_upto = 0
+    prev_revealed = frozenset()
     for k, beat in enumerate(beats1):
         caption = cv.captions[k] if cv.captions is not None else None
-        new_lines = code_lines[prev_upto:beat.reveal_upto]
-        stream = "\n".join(new_lines)
+        new_group = sorted(beat.revealed - prev_revealed)
+        stream = "\n".join(code_lines[i - 1] for i in new_group)
 
         if len(stream) >= 2 and stream.strip():
             if beat.narration:
@@ -940,30 +992,35 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
                 duration = probe_duration(audio)
             else:
                 audio, duration = None, len(stream) * typing_speed
-            clip = make_pass1_code_clip(cv, code_lines[:prev_upto], new_lines,
+            clip = make_pass1_code_clip(cv, code_lines, prev_revealed, new_group,
                                         caption, duration, work, f"p1_{k:03d}", audio=audio)
             if clip:
                 clips.append(clip)
         elif beat.narration:
-            hold = compose(cv, "\n".join(code_lines[:beat.reveal_upto]), [], {},
+            hold = compose(cv, _visible_code(code_lines, beat.revealed), [], {},
                            caption, os.path.join(work, f"p1_hold_{k:03d}.png"))
             audio = _cached_synth(synth, audio_cache, beat.narration, work, f"p1b_{k:03d}")
             clip = os.path.join(work, f"p1_clip_{k:03d}.mp4")
             make_clip(hold, audio, clip)
             clips.append(clip)
-        # else: no new code and nothing to say — no clip for this beat.
+        # else: a comment-only marker with no pass-1 narration — nothing to
+        # type and nothing to say, no clip for this beat (expected). A
+        # code-bearing marker always has its own line in `new_group`
+        # (_reveal_groups() groups are disjoint), so this case never fires
+        # for one — every numbered line gets its own beat, regardless of
+        # playback order.
 
-        prev_upto = max(prev_upto, beat.reveal_upto)
+        prev_revealed = beat.revealed
         print(f"  [pass1 {k+1}/{len(beats1)}] {beat.narration[:60] or '(silent)'}")
 
     off = len(beats1)
     # Pass 1 already typed everything up to the last marked line — pass 2
     # keeps that code on screen throughout instead of re-hiding and
     # progressively re-revealing it; only the highlight/state panel move.
-    final_upto = beats1[-1].reveal_upto
+    final_revealed = beats1[-1].revealed
     for k, beat in enumerate(beats2):
         caption = cv.captions[off + k] if cv.captions is not None else None
-        hold = compose(cv, "\n".join(code_lines[:final_upto]),
+        hold = compose(cv, _visible_code(code_lines, final_revealed),
                        [beat.highlight] if beat.highlight else [],
                        beat.state, caption, os.path.join(work, f"p2_hold_{k:03d}.png"))
         clip = os.path.join(work, f"p2_clip_{k:03d}.mp4")
@@ -1106,24 +1163,24 @@ def build(source_path, out_path, tts, trace=True, every=False,
 
     audio_cache = {}   # identical narration (e.g. an un-interpolated loop line) -> reuse
     clips = []
-    prev_upto = 0
+    prev_revealed = frozenset()
     for k, beat in enumerate(beats):
         caption = cv.captions[k] if cv.captions is not None else None
 
         # Typing pre-roll for newly revealed lines (first-exec mode only).
-        if typing and beat.reveal_upto is not None:
-            new_lines = code_lines[prev_upto:beat.reveal_upto]
-            tf = typing_frames(cv, code_lines[:prev_upto], new_lines,
-                               beat.state, caption, work, tag=f"{k:03d}",
-                               typing_speed=typing_speed)
-            if tf:
-                tclip = os.path.join(work, f"type_{k:03d}.mp4")
-                make_typing_clip(os.path.dirname(tf[0]), len(tf), tclip)
-                clips.append(tclip)
+        if typing and beat.revealed is not None:
+            new_group = sorted(beat.revealed - prev_revealed)
+            if new_group:
+                tf = typing_frames(cv, code_lines, prev_revealed, new_group,
+                                   beat.state, caption, work, tag=f"{k:03d}",
+                                   typing_speed=typing_speed)
+                if tf:
+                    tclip = os.path.join(work, f"type_{k:03d}.mp4")
+                    make_typing_clip(os.path.dirname(tf[0]), len(tf), tclip)
+                    clips.append(tclip)
 
         # Hold frame + narration.
-        n = beat.reveal_upto if beat.reveal_upto is not None else len(code_lines)
-        hold = compose(cv, "\n".join(code_lines[:n]),
+        hold = compose(cv, _visible_code(code_lines, beat.revealed),
                        [beat.highlight] if beat.highlight else [],
                        beat.state, caption, os.path.join(work, f"hold_{k:03d}.png"))
         if beat.narration not in audio_cache:
@@ -1138,8 +1195,8 @@ def build(source_path, out_path, tts, trace=True, every=False,
             make_pause_clip(hold, pause, pclip)
             clips.append(pclip)
 
-        if beat.reveal_upto is not None:
-            prev_upto = max(prev_upto, beat.reveal_upto)
+        if beat.revealed is not None:
+            prev_revealed = beat.revealed
         print(f"  [{k+1}/{len(beats)}] {beat.narration[:60]}")
 
     concat(clips, out_path, work)

@@ -89,9 +89,10 @@ Key data structures:
 - **`Step`** `(line_no, disp, text, frame_id)` — one *execution* of a line, in
   completion order. `disp` = `{name: repr}` for the panel; `text` =
   `{name: str(value)}` for `{var}` interpolation; `frame_id` = `id(frame)`.
-- **`Beat`** `(reveal_upto, highlight, narration, state)` — one render-ready unit
+- **`Beat`** `(revealed, highlight, narration, state)` — one render-ready unit
   = one frame + one narration clip. `narration` is already interpolated;
-  `reveal_upto=None` means "show all code".
+  `revealed` is a `frozenset[int]` of 1-based source lines visible at this
+  beat (see `_visible_code()`); `revealed=None` means "show all code".
 - **`Canvas`** — fixed dimensions + per-beat wrapped caption lines, computed once
   so every frame shares one resolution.
 
@@ -118,13 +119,14 @@ together, opening on a blank canvas (`typing_frames()`'s `start_blank` path),
 and the clip is sized to the narration's real duration), and once with the
 real `steps` (part2 text) for **pass 2** ("walkthrough" — same per-beat
 highlight/state/narration as single-pass first-exec mode, but
-`_render_two_pass()` deliberately ignores each beat's `reveal_upto` here and
-always composes the full code pass 1 already typed (`code_lines[:final_upto]`,
-`final_upto = beats1[-1].reveal_upto`) — only the highlight and state panel
-move per beat; the code is never hidden and re-revealed). `_render_two_pass()`
-renders all of pass 1 then all of pass 2, concatenated into one video. A file
-with no `/` anywhere never takes this branch — the original single-pass loop
-in `build()` is untouched, so behavior for existing snippets doesn't change.
+`_render_two_pass()` deliberately ignores each beat's `revealed` here and
+always composes the full code pass 1 already typed (`_visible_code(code_lines,
+final_revealed)`, `final_revealed = beats1[-1].revealed`) — only the
+highlight and state panel move per beat; the code is never hidden and
+re-revealed). `_render_two_pass()` renders all of pass 1 then all of pass 2,
+concatenated into one video. A file with no `/` anywhere never takes this
+branch — the original single-pass loop in `build()` is untouched, so behavior
+for existing snippets doesn't change.
 
 #### Custom narration order (first-exec only, orthogonal to two-pass)
 
@@ -137,13 +139,24 @@ number (stable sort; unnumbered passes are left in source order, today's
 default). `build()`/`export_script()` call it once for single-pass mode
 (texts = each marker's whole `.text`); `_two_pass_beats()` calls it twice,
 once per split-off pass, so pass 1 and pass 2 can use independent orders.
-Because the returned `Marker` list is just fed into the unmodified
-`build_beats()` in playback order, `build_beats()` itself needed only one
-change to support this: `reveal_upto` is now a running **high-water mark**
-(`max` of `m.line_no` seen so far in iteration order) instead of `m.line_no`
-directly — code can only ever grow into view, so jumping ahead to narrate a
-later line first reveals everything up to it, and a later beat for an
-earlier line just re-highlights code that's already on screen. Rejected
+
+Reordering reveals genuinely out of order — it does NOT force code to appear
+as a growing top-down prefix. `_reveal_groups(code_lines, markers)` partitions
+[1, last marker's line] into one contiguous, non-overlapping group per marker
+(a marker's group = itself plus any unmarked lines back to the previous
+marker); `build_beats()` accumulates a running `frozenset` union of the groups
+visited so far (in playback order) into each beat's `revealed`, instead of a
+simple `m.line_no` high-water mark. Because groups are disjoint and every
+marker is visited exactly once, EVERY beat always has a non-empty new group
+to reveal, regardless of play order — jumping ahead to a later line no longer
+drags earlier, not-yet-visited lines along with it. `_visible_code(code_lines,
+revealed)` turns a `revealed` set into renderable text: any line NOT in the
+set renders as an empty string at its own row, so revealed lines always stay
+at their fixed position no matter what order they arrived in. `typing_frames()`
+/`make_pass1_code_clip()` take `(code_lines, revealed_before, new_group)`
+instead of a `(base_lines, new_lines)` prefix pair, typing `new_group`'s
+characters directly into its own row range while everything in
+`revealed_before` stays fully shown and everything else stays blank. Rejected
 together with `--every` (there, beat order already follows the execution
 trace, not marker order, so reordering markers would have no effect on code
 beats and would silently desync the every-mode comment-slotting logic, which
@@ -192,12 +205,19 @@ combinations:
     only ever trims a sliver of excess video — it must never truncate real
     narration. Only the *silent* (empty part1) sub-case is capped by
     `TYPE_MAXFRAMES`; the narrated sub-case is deliberately uncapped.
-11. **`reveal_upto` in first-exec mode is a running high-water mark, not
-    `m.line_no`** (`build_beats()`'s `not every` branch). This is what lets
-    `order_markers()` narrate lines out of source order without ever erasing
-    code an earlier beat already showed — don't revert it to a direct
-    `m.line_no` assignment, even though that's a no-op for the common
-    (unordered, already-ascending) case.
+11. **`Beat.revealed` in first-exec mode is a running union of `_reveal_groups()`
+    groups, not a `m.line_no` cutoff** (`build_beats()`'s `not every` branch).
+    This is what lets `order_markers()` narrate lines genuinely out of source
+    order — revealing only the specific line(s) each beat owns — without ever
+    erasing code an earlier beat already showed or dragging along lines that
+    haven't been visited yet.
+12. **`PythonLexer(stripnl=False)` in `_render_code()`.** Pygments lexers
+    strip leading/trailing blank lines by default; `_visible_code()` renders
+    not-yet-revealed lines as empty strings, so a leading run of them (e.g.
+    only line 7 of 7 revealed so far) would otherwise get stripped and shove
+    the real content up to row 1 — silently breaking every out-of-order
+    reveal. Don't drop `stripnl=False`, even though single-pass, top-to-bottom
+    (no leading/trailing blanks) renders look identical either way.
 
 ### TTS backends
 

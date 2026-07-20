@@ -179,7 +179,7 @@ def test_order_markers_rejects_mixed_numbering():
         order_markers(markers, [m.text for m in markers])
 
 
-def test_build_beats_reveal_upto_never_shrinks_for_reordered_markers():
+def test_build_beats_reveals_only_visited_lines_in_custom_order():
     source = (
         "def fib(n):             #: 3) def line\n"
         "    a = n                #: 1) init line\n"
@@ -190,10 +190,15 @@ def test_build_beats_reveal_upto_never_shrinks_for_reordered_markers():
     ordered = order_markers(markers, [m.text for m in markers])
     beats = build_beats(code_lines, ordered, steps, every=False)
 
-    reveal = [b.reveal_upto for b in beats]
-    assert reveal == sorted(reveal)              # non-decreasing, never shrinks
+    revealed = [b.revealed for b in beats]
     assert [b.highlight for b in beats] == [2, 3, 1]
-    assert reveal[-1] == 3                        # final beat has revealed everything
+    # each beat's revealed set only grows (a superset of the last), never shrinks
+    assert all(revealed[i] <= revealed[i + 1] for i in range(len(revealed) - 1))
+    # line 1 (an earlier, not-yet-visited source line) is NOT dragged along
+    # just because line 2 -- a higher line number -- is revealed first
+    assert revealed[0] == {2}
+    assert revealed[1] == {2, 3}
+    assert revealed[-1] == {1, 2, 3}               # final beat has revealed everything
 
 
 def test_two_pass_beats_supports_independent_per_pass_order():
