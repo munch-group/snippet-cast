@@ -161,6 +161,7 @@ MARKER = "#:"           # trailing-comment token that marks a narration line
 STYLE = "monokai"       # any pygments style name
 FONT_NAME = "DejaVu Sans Mono"
 FONT_SIZE = 26
+PANEL_FONT_SIZE = 32    # state-panel name/value text; header is PANEL_FONT_SIZE - 8
 FPS = 30
 WORDS_PER_SEC = 2.6     # only used by the 'silent' backend to fake durations
 PAD = 40                # px padding around the code on the canvas
@@ -408,8 +409,8 @@ def render_panel(vars_dict, width, height):
     """A fixed-size 'state' panel listing name = value pairs."""
     img = Image.new("RGB", (width, height), PANEL_BG)
     d = ImageDraw.Draw(img)
-    font = _mono_font(FONT_SIZE)
-    head = _mono_font(max(12, FONT_SIZE - 8))
+    font = _mono_font(PANEL_FONT_SIZE)
+    head = _mono_font(max(12, PANEL_FONT_SIZE - 8))
     asc, desc = font.getmetrics()
     lh = asc + desc + 8
     x, y = PANEL_PAD, PANEL_PAD
@@ -627,12 +628,23 @@ def plan_canvas(code_lines, beats, show_panel, subtitles):
 
     panel_w = 0
     if show_panel:
-        font = _mono_font(FONT_SIZE)
+        font = _mono_font(PANEL_FONT_SIZE)
         meas = ImageDraw.Draw(Image.new("RGB", (1, 1)))
         longest = max(
             (meas.textlength(f"{n} = {v}", font=font)
              for b in beats for n, v in b.state.items()), default=0)
         panel_w = int(max(240, longest + 2 * PANEL_PAD))
+
+        # The panel is drawn into an image exactly `code_h` tall (see
+        # compose()); with a larger PANEL_FONT_SIZE a beat with many state
+        # variables and few code lines could need more room than the code
+        # column provides, so grow code_h (and the overall canvas) to fit —
+        # never shrink the code column, only ever tall enough for both.
+        asc, desc = font.getmetrics()
+        lh = asc + desc + 8
+        max_rows = max((len(b.state) for b in beats), default=0)
+        panel_h = 2 * PANEL_PAD + lh * (1 + max(1, max_rows))  # header + rows
+        code_h = max(code_h, panel_h)
 
     W = _even(PAD + code_w + (GAP + panel_w if panel_w else 0) + PAD)
 
