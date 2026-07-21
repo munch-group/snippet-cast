@@ -218,6 +218,19 @@ combinations:
     the real content up to row 1 — silently breaking every out-of-order
     reveal. Don't drop `stripnl=False`, even though single-pass, top-to-bottom
     (no leading/trailing blanks) renders look identical either way.
+13. **`STYLE` may be a pygments style name OR a `Style` subclass** — every
+    call site must handle both. `ImageFormatter`/`Formatter._lookup_style`
+    already do (pygments accepts either natively); `plan_canvas()`'s
+    background-color lookup does not (`get_style_by_name()` requires a
+    string), so it goes through `_resolve_style()` instead — don't call
+    `get_style_by_name(STYLE)` directly. Relatedly, caption/rule colors
+    (`COL_CAPTION`/`COL_RULE`) are hardcoded for a DARK background; a light
+    STYLE (e.g. `LightModernStyle`) needs `COL_CAPTION_LIGHT`/`COL_RULE_LIGHT`
+    instead, or the caption is nearly invisible. `plan_canvas()` picks
+    between them via `_is_light()` (perceived luminance of the resolved
+    background) and stores the result on `Canvas.cap_fg`/`cap_rule` — don't
+    reintroduce a hardcoded `COL_CAPTION`/`COL_RULE` reference in
+    `_draw_caption()`.
 
 ### TTS backends
 
@@ -282,14 +295,26 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
 ### Common changes
 
 - **Add a TTS backend:** write `synth_x(text, out)->path`, add to `BACKENDS`. Done.
-- **Change theme/font:** edit `STYLE` (any pygments style) and `FONT_NAME` /
-  `FONT_SIZE`; panel/caption colours are constants. Both the hand-drawn panel
-  (`_mono_font`) and the pygments code frame (`_render_code`) resolve a font
-  file via `_mono_font_path()`/`_FONT_CANDIDATES` first, falling back to
-  `FONT_NAME`'s by-name OS lookup only if none of those paths exist — add
-  paths to `_FONT_CANDIDATES` for a new platform/font rather than relying on
-  `FONT_NAME` alone, since pygments resolves bare names against the OS's
-  installed fonts (e.g. "DejaVu Sans Mono" isn't a stock macOS font).
+- **Change theme/font:** edit `STYLE` — either a registered pygments style
+  name (default: `"monokai"`), or a `pygments.style.Style` subclass assigned
+  directly, e.g. `STYLE = DarkModernStyle` (no pygments registration/entry
+  point needed; `_resolve_style()` handles both — see critical invariant 13).
+  Two such classes ship in `screencast.py`: `DarkModernStyle` and
+  `LightModernStyle`, colors taken directly from VS Code's own
+  theme-defaults source (its current built-in "Dark Modern"/"Light Modern"
+  themes). `plan_canvas()` picks readable caption/rule colors for whichever
+  STYLE is active via `_is_light()` (background luminance) — see invariant 13.
+  Also edit `FONT_NAME`/`FONT_SIZE` (code) and `PANEL_FONT_SIZE` (state
+  panel) for font changes; panel background/text colours (`PANEL_BG`,
+  `COL_HEADER`, `COL_NAME`, `COL_VALUE`) are separate constants, not derived
+  from STYLE — they're drawn in their own contrasting box regardless of the
+  main background (see `render_panel()`), so they don't need to be. Both the
+  hand-drawn panel (`_mono_font`) and the pygments code frame (`_render_code`)
+  resolve a font file via `_mono_font_path()`/`_FONT_CANDIDATES` first,
+  falling back to `FONT_NAME`'s by-name OS lookup only if none of those paths
+  exist — add paths to `_FONT_CANDIDATES` for a new platform/font rather than
+  relying on `FONT_NAME` alone, since pygments resolves bare names against
+  the OS's installed fonts (e.g. "DejaVu Sans Mono" isn't a stock macOS font).
 - **Change the narration marker:** `MARKER` (keep it a valid `#` comment prefix).
 - **Adjust typing speed:** default is `TYPE_SPEED` (seconds/char), overridable
   per-run with `--typing-speed`; `TYPE_MAXFRAMES` is a safety cap on frames

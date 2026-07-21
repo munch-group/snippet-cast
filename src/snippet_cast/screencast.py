@@ -152,13 +152,16 @@ from PIL import Image, ImageDraw, ImageFont
 from pygments import highlight
 from pygments.formatters import ImageFormatter
 from pygments.lexers import PythonLexer
+from pygments.style import Style
 from pygments.styles import get_style_by_name
+from pygments.token import Comment, Error, Keyword, Name, Number, Operator, String, Token
 
 # ---------------------------------------------------------------------------
 # Config — tweak freely.
 # ---------------------------------------------------------------------------
 MARKER = "#:"           # trailing-comment token that marks a narration line
-STYLE = "monokai"       # any pygments style name
+STYLE = "monokai"       # any registered pygments style name, OR a
+                        # pygments.style.Style subclass (no registration needed)
 FONT_NAME = "DejaVu Sans Mono"
 FONT_SIZE = 26
 PANEL_FONT_SIZE = 32    # state-panel name/value text; header is PANEL_FONT_SIZE - 8
@@ -174,8 +177,10 @@ COL_VALUE = "#f8f8f2"   # variable values
 MAXVAL = 42             # truncate a value's repr to this many chars
 CAP_PAD = 24            # inner padding of the caption band
 CAP_GAP = 10            # px between wrapped caption lines
-COL_CAPTION = "#e8e8e8" # caption text
-COL_RULE = "#3a3b36"    # thin rule above the caption band
+COL_CAPTION = "#e8e8e8"       # caption text on a dark STYLE background
+COL_RULE = "#3a3b36"          # rule above the caption band on a dark STYLE background
+COL_CAPTION_LIGHT = "#2b2b2b" # caption text on a light STYLE background
+COL_RULE_LIGHT = "#d0d0d0"    # rule above the caption band on a light STYLE background
 TYPE_SPEED = 0.035      # default seconds to reveal each new character in --typing mode
 TYPE_MAXFRAMES = 150    # absolute cap on typing frames per beat, so a slow speed
                         # or a very long line can't blow a beat up unboundedly
@@ -192,6 +197,83 @@ _FONT_CANDIDATES = [
     "/Library/Fonts/Menlo.ttc",
     "C:\\Windows\\Fonts\\consola.ttf",                        # Windows
 ]
+
+# ---------------------------------------------------------------------------
+# Bundled pygments Style subclasses mirroring VS Code's current built-in
+# default themes ("Dark Modern" / "Light Modern" — the defaults since
+# VS Code 1.71, distinct from the older "Dark+"/"Light+" classic themes).
+# Not registered with pygments (no setup.cfg entry point needed): assign the
+# class itself to STYLE, e.g. `STYLE = DarkModernStyle` — see _resolve_style().
+#
+# Colors are taken directly from VS Code's own theme-defaults source
+# (github.com/microsoft/vscode, extensions/theme-defaults/themes/), each
+# "Modern" theme's editor.background/foreground plus its included
+# dark_plus.json/light_plus.json + dark_vs.json/light_vs.json tokenColors
+# (Modern themes only override a few UI/editor colors; token colors are
+# inherited unchanged from Dark+/Light+). Two simplifications were forced by
+# Pygments' coarser token model, since VS Code's TextMate grammar draws
+# distinctions Pygments' PythonLexer doesn't emit:
+#   - Keyword: VS Code colors control-flow keywords (if/for/while/return/
+#     import/...) separately from declaration keywords (def/class, scoped
+#     storage.type) — pygments emits plain Token.Keyword for both, so this
+#     uses the control-flow color (the one seen far more often in a typical
+#     snippet).
+#   - Name.Builtin: VS Code colors builtin functions (print/range/len/...)
+#     separately from builtin types (int/str/bool/...) — pygments emits
+#     plain Token.Name.Builtin for both, so this uses the builtin-function
+#     color (this project's own test snippets only ever exercise the
+#     function case: print(), range()).
+# ---------------------------------------------------------------------------
+class DarkModernStyle(Style):
+    """VS Code's default dark theme ("Dark Modern")."""
+
+    background_color = "#1F1F1F"
+    styles = {
+        Token:                  "#CCCCCC",
+        Comment:                "#6A9955",
+        Keyword:                "#C586C0",
+        Keyword.Namespace:      "#C586C0",
+        Keyword.Constant:       "#569CD6",
+        Operator:               "#D4D4D4",
+        Operator.Word:          "#569CD6",
+        Number:                 "#B5CEA8",
+        String:                 "#CE9178",
+        Name:                   "#9CDCFE",
+        Name.Function:          "#DCDCAA",
+        Name.Class:             "#4EC9B0",
+        Name.Namespace:         "#4EC9B0",
+        Name.Builtin:           "#DCDCAA",
+        Name.Builtin.Pseudo:    "#569CD6",   # self / cls
+        Name.Exception:         "#4EC9B0",
+        Name.Decorator:         "#DCDCAA",
+        Error:                  "#F44747",
+    }
+
+
+class LightModernStyle(Style):
+    """VS Code's default light theme ("Light Modern")."""
+
+    background_color = "#FFFFFF"
+    styles = {
+        Token:                  "#3B3B3B",
+        Comment:                "#008000",
+        Keyword:                "#AF00DB",
+        Keyword.Namespace:      "#AF00DB",
+        Keyword.Constant:       "#0000FF",
+        Operator:               "#3B3B3B",
+        Operator.Word:          "#0000FF",
+        Number:                 "#098658",
+        String:                 "#A31515",
+        Name:                   "#001080",
+        Name.Function:          "#795E26",
+        Name.Class:             "#267F99",
+        Name.Namespace:         "#267F99",
+        Name.Builtin:           "#795E26",
+        Name.Builtin.Pseudo:    "#0000FF",   # self / cls
+        Name.Exception:         "#267F99",
+        Name.Decorator:         "#795E26",
+        Error:                  "#CD3131",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -619,10 +701,34 @@ class Canvas:
     cap_h: int
     bg: str
     captions: list       # per-beat list of wrapped caption lines (or None)
+    cap_fg: str = COL_CAPTION
+    cap_rule: str = COL_RULE
+
+
+def _resolve_style(style):
+    """STYLE may be a registered pygments style name, or a Style subclass
+    passed directly (pygments.formatter.Formatter accepts either already —
+    see ImageFormatter's `style=` in _render_code() — this mirrors that same
+    isinstance check for the one call site, get_style_by_name(), that only
+    accepts a name)."""
+    return get_style_by_name(style) if isinstance(style, str) else style
+
+
+def _is_light(hex_color):
+    """Perceived-brightness check on a '#rrggbb' background, so caption text
+    (drawn straight onto the canvas, not inside its own contrasting panel —
+    see PANEL_BG) can pick a readable color for either a dark or light
+    STYLE — COL_CAPTION/COL_RULE assume dark, e.g. DarkModernStyle;
+    COL_CAPTION_LIGHT/COL_RULE_LIGHT assume light, e.g. LightModernStyle."""
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    return (0.299 * r + 0.587 * g + 0.114 * b) > 128
 
 
 def plan_canvas(code_lines, beats, show_panel, subtitles):
-    bg = get_style_by_name(STYLE).background_color or "#000000"
+    bg = _resolve_style(STYLE).background_color or "#000000"
+    cap_fg, cap_rule = (COL_CAPTION_LIGHT, COL_RULE_LIGHT) if _is_light(bg) \
+        else (COL_CAPTION, COL_RULE)
     full = _render_code("\n".join(code_lines), hl_lines=[])
     code_w, code_h = full.width, full.height
 
@@ -659,20 +765,20 @@ def plan_canvas(code_lines, beats, show_panel, subtitles):
         cap_h = 2 * CAP_PAD + max_lines * clh
 
     H = _even(PAD + code_h + PAD + cap_h)
-    return Canvas(W, H, code_w, code_h, panel_w, cap_h, bg, captions)
+    return Canvas(W, H, code_w, code_h, panel_w, cap_h, bg, captions, cap_fg, cap_rule)
 
 
 def _draw_caption(canvas, cv, lines):
     d = ImageDraw.Draw(canvas)
     top = cv.H - cv.cap_h
-    d.line([(PAD, top), (cv.W - PAD, top)], fill=COL_RULE, width=2)
+    d.line([(PAD, top), (cv.W - PAD, top)], fill=cv.cap_rule, width=2)
     cfont = _mono_font(max(14, FONT_SIZE - 4))
     asc, desc = cfont.getmetrics()
     clh = asc + desc + CAP_GAP
     y = top + CAP_PAD
     for ln in lines:
         w = d.textlength(ln, font=cfont)
-        d.text(((cv.W - w) / 2, y), ln, font=cfont, fill=COL_CAPTION)
+        d.text(((cv.W - w) / 2, y), ln, font=cfont, fill=cv.cap_fg)
         y += clh
 
 
