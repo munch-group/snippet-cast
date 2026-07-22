@@ -140,9 +140,11 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import tokenize
 import urllib.error
 import urllib.request
@@ -188,6 +190,7 @@ TWO_PASS_SEP = "/"      # splits a #: narration into "writing pass / walkthrough
 PART2_EMPTY_HOLD = 0.8  # seconds to hold a walkthrough-pass beat with no narration
 AUDIO_AR = "44100"      # normalise all clips so concat -c copy is safe
 AUDIO_AC = "2"
+MANUAL_AUDIO_EXTS = (".wav", ".mp3", ".m4a", ".aiff", ".flac", ".ogg")  # --tts manual / --record
 
 # Monospace font files to try for the PIL-drawn state panel (first hit wins).
 _FONT_CANDIDATES = [
@@ -968,7 +971,7 @@ def make_manual_backend(audio_dir):
     def synth_manual(text, out):
         counter["n"] += 1
         stem = f"{counter['n']:03d}"
-        for ext in (".wav", ".mp3", ".m4a", ".aiff", ".flac", ".ogg"):
+        for ext in MANUAL_AUDIO_EXTS:
             candidate = os.path.join(audio_dir, stem + ext)
             if os.path.exists(candidate):
                 return candidate
@@ -1040,32 +1043,49 @@ def make_typing_clip(frames_dir, n_frames, out, audio=None):
 
 
 def make_pass1_code_clip(cv, code_lines, revealed_before, new_group, caption_lines,
-                         duration, outdir, tag, audio=None):
+                         duration, outdir, tag, audio=None, typing_speed=TYPE_SPEED):
     """One pass-1 'writing' clip: types the lines in `new_group` into their
     row positions (lines in `revealed_before` stay shown, everything else
     stays blank — see typing_frames()), reaching 100% typed on the last
     frame (two-pass mode has no separate hold-at-100% frame after typing),
     muxed with `audio` (real narration) or silent if `audio` is None.
-    `duration` paces the typing: real audio length when `audio` is given
-    (frame count is NOT capped by TYPE_MAXFRAMES — narration audio must
-    never be truncated), else `len(group's lines joined) * typing_speed`
-    when writing silently (capped by TYPE_MAXFRAMES, same safety valve as
-    legacy --typing). Frame count is ceil(duration * FPS) so the clip is
-    never shorter than `audio`; make_typing_clip's -shortest then trims at
-    most one frame of excess video, never truncating narration. Returns
-    None if the group's joined text has < 2 characters (nothing worth
-    animating — caller falls back to a static hold)."""
+
+    The reveal itself is always paced by `typing_speed` (capped at
+    TYPE_MAXFRAMES frames, same safety valve as legacy --typing) — it no
+    longer gets silently overridden by narration length. `duration` (real
+    audio length when `audio` is given, else `len(group's lines joined) *
+    typing_speed` from the caller) is instead a FLOOR: if the typed reveal
+    finishes before `duration`, the fully-typed frame is held for the
+    remainder, so a clip is never shorter than its narration audio (see
+    CLAUDE.md invariant 10) without slowing the reveal below the requested
+    typing_speed just to stretch it across the whole narration. If
+    typing_speed would need MORE time than `duration` provides (a slow
+    --typing-speed paired with brief narration), the reveal is — same as
+    before this fix — cut short by make_typing_clip's -shortest at the real
+    audio length; narration itself is still never truncated. Returns None
+    if the group's joined text has < 2 characters (nothing worth animating
+    — caller falls back to a static hold)."""
     stream = "\n".join(code_lines[i - 1] for i in new_group)
     if len(stream) < 2 or not stream.strip():
         return None
-    frames_target = duration * FPS
-    if audio is None:
-        frames_target = min(TYPE_MAXFRAMES, frames_target)
-    n_frames = max(1, math.ceil(frames_target))
+    total = len(stream)
+    typing_n_frames = min(TYPE_MAXFRAMES, max(1, round(total * typing_speed * FPS)))
     frames = typing_frames(cv, code_lines, revealed_before, new_group, {}, caption_lines,
-                           outdir, tag, n_frames=n_frames, reach_full=True)
+                           outdir, tag, n_frames=typing_n_frames, reach_full=True)
     if not frames:
         return None
+    if audio is not None:
+        floor_frames = max(1, math.ceil(duration * FPS))
+        if floor_frames > len(frames):
+            # Narration outlasts the typed reveal: hold the final,
+            # fully-typed frame for the remainder rather than spreading the
+            # reveal itself thinner to fill the whole narration.
+            frames_dir = os.path.dirname(frames[-1])
+            last = frames[-1]
+            for i in range(len(frames), floor_frames):
+                pad_path = os.path.join(frames_dir, f"{i:03d}.png")
+                shutil.copyfile(last, pad_path)
+                frames.append(pad_path)
     clip = os.path.join(outdir, f"type_{tag}.mp4")
     make_typing_clip(os.path.dirname(frames[0]), len(frames), clip, audio=audio)
     return clip
@@ -1076,9 +1096,16 @@ def concat(clips, out, workdir):
     with open(listfile, "w") as fh:
         for c in clips:
             fh.write(f"file '{os.path.abspath(c)}'\n")
+    # -movflags +faststart: without it, -c copy leaves the moov atom (the
+    # sample index) at the END of the file — confirmed via a raw atom scan.
+    # macOS Finder/Quick Look/QuickTime Player need it near the START to
+    # generate a thumbnail/poster frame quickly; without it they show a
+    # black window on open instead (this is exactly that, not a black FRAME
+    # actually rendered into the video — the rendered first frame itself is
+    # correct, see CLAUDE.md). A second, fast remux pass (no re-encode).
     subprocess.run(
         ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listfile,
-         "-c", "copy", out],
+         "-c", "copy", "-movflags", "+faststart", out],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -1103,6 +1130,7 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
         caption = cv.captions[k] if cv.captions is not None else None
         new_group = sorted(beat.revealed - prev_revealed)
         stream = "\n".join(code_lines[i - 1] for i in new_group)
+        pause_frame = None
 
         if len(stream) >= 2 and stream.strip():
             if beat.narration:
@@ -1111,9 +1139,12 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
             else:
                 audio, duration = None, len(stream) * typing_speed
             clip = make_pass1_code_clip(cv, code_lines, prev_revealed, new_group,
-                                        caption, duration, work, f"p1_{k:03d}", audio=audio)
+                                        caption, duration, work, f"p1_{k:03d}", audio=audio,
+                                        typing_speed=typing_speed)
             if clip:
                 clips.append(clip)
+                pause_frame = compose(cv, _visible_code(code_lines, beat.revealed), [], {},
+                                      caption, os.path.join(work, f"p1_pausehold_{k:03d}.png"))
         elif beat.narration:
             hold = compose(cv, _visible_code(code_lines, beat.revealed), [], {},
                            caption, os.path.join(work, f"p1_hold_{k:03d}.png"))
@@ -1121,12 +1152,18 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
             clip = os.path.join(work, f"p1_clip_{k:03d}.mp4")
             make_clip(hold, audio, clip)
             clips.append(clip)
+            pause_frame = hold
         # else: a comment-only marker with no pass-1 narration — nothing to
         # type and nothing to say, no clip for this beat (expected). A
         # code-bearing marker always has its own line in `new_group`
         # (_reveal_groups() groups are disjoint), so this case never fires
         # for one — every numbered line gets its own beat, regardless of
         # playback order.
+
+        if pause_frame and pause > 0 and k < len(beats1) - 1:
+            pclip = os.path.join(work, f"p1_pause_{k:03d}.mp4")
+            make_pause_clip(pause_frame, pause, pclip)
+            clips.append(pclip)
 
         prev_revealed = beat.revealed
         print(f"  [pass1 {k+1}/{len(beats1)}] {beat.narration[:60] or '(silent)'}")
@@ -1156,6 +1193,39 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
         print(f"  [pass2 {k+1}/{len(beats2)}] {beat.narration[:60] or '(silent)'}")
 
     return clips
+
+
+def _build_all_beats(source_path, trace, every):
+    """Shared parse -> two-pass-detect -> validate -> trace -> beats
+    preamble used by build(), export_script(), and record_narration().
+    Returns (code_lines, beats1, beats2): beats1 is the two-pass 'writing'
+    pass (empty list for a file with no '/' narration split), beats2 is
+    either the two-pass 'walkthrough' pass or, for a non-two-pass file,
+    the complete single-pass beat sequence. `bool(beats1)` tells a caller
+    whether two-pass mode was used."""
+    source = open(source_path).read()
+    code_lines, markers = parse(source)
+    if not markers:
+        sys.exit(f"No narration found. Add trailing '{MARKER} ...' comments.")
+
+    two_pass = any(TWO_PASS_SEP in m.text for m in markers)
+    if two_pass and every:
+        sys.exit("Two-pass narration ('/' in a marker) isn't supported with "
+                 "--every; remove the '/' or drop --every.")
+    if not two_pass:
+        if every and any(_parse_order(m.text)[0] is not None for m in markers):
+            sys.exit("Numbered 'N) ' order prefixes require first-exec mode; "
+                     "drop --every or remove the prefixes.")
+        markers = order_markers(markers, [m.text for m in markers])
+
+    steps = trace_run(source, source_path) if trace else []
+    if two_pass:
+        beats1, beats2 = _two_pass_beats(code_lines, markers, steps)
+    else:
+        loop_ranges = loop_body_ranges(source) if every else {}
+        beats1 = []
+        beats2 = build_beats(code_lines, markers, steps, every=every, loop_ranges=loop_ranges)
+    return code_lines, beats1, beats2
 
 
 def build(source_path, out_path, tts, trace=True, every=False,
@@ -1234,29 +1304,26 @@ def build(source_path, out_path, tts, trace=True, every=False,
     else:
         synth = BACKENDS[tts]
 
-    source = open(source_path).read()
-    code_lines, markers = parse(source)
-    if not markers:
-        sys.exit(f"No narration found. Add trailing '{MARKER} ...' comments.")
+    code_lines, beats1, beats2 = _build_all_beats(source_path, trace, every)
+    _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
+                       every, subtitles, typing, typing_speed, pause)
 
-    two_pass = any(TWO_PASS_SEP in m.text for m in markers)
-    if two_pass and every:
-        sys.exit("Two-pass narration ('/' in a marker) isn't supported with "
-                 "--every; remove the '/' or drop --every.")
+
+def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
+                       every, subtitles, typing, typing_speed, pause):
+    """Render already-computed beats (from _build_all_beats()) to `out_path`.
+    Factored out of build() so record_narration() can render straight from
+    the beats its interactive session already built — reusing the SAME
+    interpolated narration/state the user recorded against, and skipping a
+    second trace_run() (a second full execution of the user's snippet)."""
+    two_pass = bool(beats1)
     if two_pass and typing:
         print("note: --typing has no effect in two-pass mode ('/' in a "
               "marker) — the writing pass always types the new code in.")
-    if not two_pass:
-        if every and any(_parse_order(m.text)[0] is not None for m in markers):
-            sys.exit("Numbered 'N) ' order prefixes require first-exec mode; "
-                     "drop --every or remove the prefixes.")
-        markers = order_markers(markers, [m.text for m in markers])
 
-    steps = trace_run(source, source_path) if trace else []
     work = tempfile.mkdtemp(prefix="screencast_")
 
     if two_pass:
-        beats1, beats2 = _two_pass_beats(code_lines, markers, steps)
         print(f"{len(beats1)+len(beats2)} beats ({len(beats1)} pass-1 + "
               f"{len(beats2)} pass-2) -> {out_path}  (backend: {tts}, "
               f"trace: {'on' if trace else 'off'}, two-pass)")
@@ -1270,8 +1337,7 @@ def build(source_path, out_path, tts, trace=True, every=False,
         print("done.")
         return
 
-    loop_ranges = loop_body_ranges(source) if every else {}
-    beats = build_beats(code_lines, markers, steps, every=every, loop_ranges=loop_ranges)
+    beats = beats2
     mode = "every-exec" if every else "first-exec"
     extras = "".join(x for x in [" +subs" if subtitles else "",
                                  " +typing" if typing else ""])
@@ -1322,14 +1388,37 @@ def build(source_path, out_path, tts, trace=True, every=False,
     print("done.")
 
 
+def _narration_sequence(beats1, beats2):
+    """Yield (pass_no, beat_idx, beat, number, dup_of) for every beat across
+    both passes, in the exact order/dedup build() requests audio in: pass 1
+    entirely before pass 2 (the same sequence _two_pass_beats() /
+    build_beats() produce), one number per unique non-empty narration
+    string (first-seen order) — the same dedup semantics as
+    audio_cache/_cached_synth. `number` is None for a beat that needs no
+    recording of its own: either silent (empty narration, `dup_of` also
+    None) or a duplicate of an earlier number (`dup_of` set to it)."""
+    seen, n = {}, 0
+    sequence = ([(1, i, b) for i, b in enumerate(beats1)] +
+                [(2, i, b) for i, b in enumerate(beats2)])
+    for pass_no, idx, beat in sequence:
+        text = beat.narration
+        if not text:
+            yield pass_no, idx, beat, None, None
+        elif text in seen:
+            yield pass_no, idx, beat, None, seen[text]
+        else:
+            n += 1
+            seen[text] = n
+            yield pass_no, idx, beat, n, None
+
+
 def _format_script(beats1, beats2):
     """Ordered, numbered narration script matching exactly what build() will
-    request from a TTS backend: one number per unique non-empty narration
-    string, first-seen order, pass 1 entirely before pass 2 — the same
-    dedup semantics as audio_cache/_cached_synth. Empty-narration beats are
-    listed as unnumbered '(silent)' placeholders (not hidden) so the script
-    stays a complete positional map of the whole video; repeated identical
-    text references the earlier number instead of getting a new one."""
+    request from a TTS backend — see _narration_sequence(). Empty-narration
+    beats are listed as unnumbered '(silent)' placeholders (not hidden) so
+    the script stays a complete positional map of the whole video; repeated
+    identical text references the earlier number instead of getting a new
+    one."""
     lines = [
         "# Narration script — one recording per numbered line.",
         "# Save as 001.wav, 002.wav, ... (or .mp3/.m4a/.aiff/.flac/.ogg) in a",
@@ -1339,19 +1428,15 @@ def _format_script(beats1, beats2):
         "# earlier recording verbatim.",
         "",
     ]
-    seen, n = {}, 0
-    sequence = ([(1, i, b.narration) for i, b in enumerate(beats1)] +
-                [(2, i, b.narration) for i, b in enumerate(beats2)])
-    for pass_no, idx, text in sequence:
+    for pass_no, idx, beat, number, dup_of in _narration_sequence(beats1, beats2):
         tag = f"[pass {pass_no}, beat {idx + 1}]"
-        if not text:
-            lines.append(f"      {tag}  (silent)")
-        elif text in seen:
-            lines.append(f"      {tag}  (dup of #{seen[text]:03d})  {text}")
+        text = beat.narration
+        if number is not None:
+            lines.append(f"{number:03d}  {tag}  {text}")
+        elif dup_of is not None:
+            lines.append(f"      {tag}  (dup of #{dup_of:03d})  {text}")
         else:
-            n += 1
-            seen[text] = n
-            lines.append(f"{n:03d}  {tag}  {text}")
+            lines.append(f"      {tag}  (silent)")
     return lines
 
 
@@ -1362,60 +1447,454 @@ def export_script(source_path, trace=True, every=False):
     request audio — as a list of printable lines. Touches no ffmpeg/ffprobe,
     so it works even where those aren't installed. Use this to know exactly
     what to record for `tts="manual"`."""
-    source = open(source_path).read()
-    code_lines, markers = parse(source)
-    if not markers:
-        sys.exit(f"No narration found. Add trailing '{MARKER} ...' comments.")
-    two_pass = any(TWO_PASS_SEP in m.text for m in markers)
-    if two_pass and every:
-        sys.exit("Two-pass narration ('/' in a marker) isn't supported with "
-                 "--every; remove the '/' or drop --every.")
-    if not two_pass:
-        if every and any(_parse_order(m.text)[0] is not None for m in markers):
-            sys.exit("Numbered 'N) ' order prefixes require first-exec mode; "
-                     "drop --every or remove the prefixes.")
-        markers = order_markers(markers, [m.text for m in markers])
-    steps = trace_run(source, source_path) if trace else []
-    if two_pass:
-        beats1, beats2 = _two_pass_beats(code_lines, markers, steps)
-    else:
-        loop_ranges = loop_body_ranges(source) if every else {}
-        beats1 = []
-        beats2 = build_beats(code_lines, markers, steps, every=every, loop_ranges=loop_ranges)
+    _, beats1, beats2 = _build_all_beats(source_path, trace, every)
     return _format_script(beats1, beats2)
+
+
+# ---------------------------------------------------------------------------
+# --record: interactively record narration for --tts manual via the system
+# microphone (macOS only — system_profiler/avfoundation/afplay, no new
+# dependency). One take per unique narration line (the same set
+# _narration_sequence() numbers); nothing touches manual_audio_dir until the
+# whole walk finishes cleanly — see record_narration()'s docstring.
+# ---------------------------------------------------------------------------
+def _default_input_device():
+    """Name of the system's currently selected default microphone (tracks
+    System Settings -> Sound -> Input live, including switching to/from
+    Bluetooth devices), via system_profiler's JSON output."""
+    try:
+        out = subprocess.run(
+            ["system_profiler", "SPAudioDataType", "-json"],
+            capture_output=True, text=True, check=True).stdout
+        items = json.loads(out)["SPAudioDataType"][0]["_items"]
+    except Exception as e:
+        sys.exit(f"record: couldn't query the default microphone via "
+                 f"system_profiler ({e}).")
+    for item in items:
+        if item.get("coreaudio_default_audio_input_device") == "spaudio_yes":
+            return item["_name"]
+    sys.exit("record: no default input device found "
+             "(check System Settings -> Sound -> Input).")
+
+
+def _record_until_enter(dest_wav, device_name, input_fn=input):
+    """Record from `device_name` into `dest_wav` until the user hits Enter.
+    ffmpeg runs in the background; Enter (or an exception, e.g. Ctrl+C)
+    stops it gracefully via SIGINT so the file is finalized either way.
+
+    Returns True if audio was actually captured, False if `dest_wav` ended
+    up missing or empty — e.g. Enter arrived faster than ffmpeg's own
+    startup (races opening the device/output file — confirmed possible
+    with a near-instant stop), or ffmpeg failed outright (most commonly:
+    the calling app — a notebook's IDE/kernel, not necessarily the same app
+    as a terminal — was never granted microphone permission; macOS grants
+    that per-application, so a terminal being allowed doesn't imply a
+    notebook's host app is too). Surfaces ffmpeg's own stderr on failure
+    instead of silently discarding it, and bails out immediately (without
+    waiting on `input_fn`) if ffmpeg has already exited, e.g. permission
+    denied — a dead recording has nothing left to stop."""
+    proc = subprocess.Popen(
+        # -loglevel error: ffmpeg's default verbosity writes continuous
+        # progress lines to stderr for the whole capture; since stderr is
+        # only read once at the end (below), NOT suppressing that risks
+        # filling the pipe buffer and stalling a long recording. At "error"
+        # only a genuine failure (e.g. permission denied) writes anything.
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "avfoundation",
+         "-i", f":{device_name}", dest_wav],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    print("starting microphone...")
+    # Wait for ffmpeg to actually open the device and create dest_wav before
+    # claiming "recording" — printing that immediately, before capture has
+    # truly started, is misleading (an Enter that arrives before this would
+    # also race ffmpeg's own startup). Also stop waiting immediately if
+    # ffmpeg has already exited on its own (e.g. permission denied).
+    for _ in range(100):  # up to ~2s
+        if os.path.exists(dest_wav) or proc.poll() is not None:
+            break
+        time.sleep(0.02)
+    if proc.poll() is None:
+        print("recording — press Enter to stop.")
+        try:
+            input_fn()
+        finally:
+            proc.send_signal(signal.SIGINT)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+    ok = os.path.exists(dest_wav) and os.path.getsize(dest_wav) > 0
+    if not ok:
+        err = proc.stderr.read().decode(errors="replace").strip() if proc.stderr else ""
+        print("ffmpeg reported:", err.splitlines()[-1] if err else "no audio captured — microphone never started.")
+    return ok
+
+
+def _play(path):
+    """Best-effort playback via afplay (macOS built-in), after resampling
+    to 44.1 kHz stereo (matching AUDIO_AR/AUDIO_AC — the same
+    normalization every other audio path in this file already applies)
+    rather than playing the raw file directly. Confirmed empirically: a
+    24 kHz mono capture (this project's mic-recorded narration, before
+    build()'s own resampling) played via afplay consistently ran ~0.5-1s
+    shorter than a 44.1kHz-stereo-resampled copy of the exact same audio,
+    across repeated trials, despite ffprobe reporting identical durations
+    for both — i.e. afplay itself, not the file, was the unreliable part
+    for that unusual source rate. If resampling fails for any reason, falls
+    back to the original file — a format afplay can't handle at all just
+    means no preview, not a hard failure."""
+    with tempfile.TemporaryDirectory() as tmp:
+        resampled = os.path.join(tmp, "preview.wav")
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-i", path, "-ar", AUDIO_AR, "-ac", AUDIO_AC, resampled],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        play_path = resampled if proc.returncode == 0 else path
+        subprocess.run(["afplay", play_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _find_recording(audio_dir, number):
+    stem = f"{number:03d}"
+    for ext in MANUAL_AUDIO_EXTS:
+        candidate = os.path.join(audio_dir, stem + ext)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _show_frame_imgcat(path):
+    """Best-effort terminal preview via imgcat — the inline-image protocol
+    common across iTerm2/WezTerm/Kitty-style setups, all of which ship or
+    alias a command literally named `imgcat` (or provide one, e.g. iTerm2's
+    own install script). Availability is checked by the caller, which
+    decides whether to use this at all; this just invokes it."""
+    subprocess.run(["imgcat", path])
+
+
+def _preview_code_text(code_lines, pass_no, beat, two_pass, final_pass1_revealed):
+    """What to show on the preview frame for one beat — mirrors what the
+    final render actually shows (see critical invariant on _render_two_pass
+    in CLAUDE.md): in two-pass mode pass 2 always shows pass 1's fully-typed
+    code (only highlight/state move), not its own `revealed`."""
+    if two_pass and pass_no == 2:
+        return _visible_code(code_lines, final_pass1_revealed)
+    if beat.revealed is None:
+        return "\n".join(code_lines)
+    return _visible_code(code_lines, beat.revealed)
+
+
+def _decide_recording(number, tag, text, audio_dir, session_dir, device_name,
+                      input_fn=input, record_fn=_record_until_enter, play_fn=_play):
+    """Prompt for one numbered narration line; return ('keep', None),
+    ('record', tmp_path), ('delete', None), or ('skip', None). Plays back
+    an existing recording first, if there is one.
+
+    The default (blank Enter) is deliberately context-dependent: with an
+    existing recording it means 'keep', which is safe. With NO existing
+    recording there is nothing to keep — a blank Enter is rejected there
+    (re-prompts) rather than silently leaving the beat unrecorded, so the
+    default action can never be the reason a beat ends up with no
+    recording. Leaving it unrecorded for now still requires the explicit
+    's' — a real bug, not hypothetical: build(tts='manual') fails outright
+    on the first beat with no numbered file, and an accidental blank Enter
+    here was a silent way to end up in exactly that state."""
+    existing = _find_recording(audio_dir, number)
+    print(f"{number:03d}  {tag}  {text}")
+    if existing:
+        play_fn(existing)
+        prompt = "[Enter=keep, r=record, d=delete] > "
+    else:
+        prompt = "[r=record, s=skip for now] > "
+    while True:
+        choice = input_fn(prompt).strip().lower()
+        if existing and choice == "":
+            return "keep", None
+        if existing and choice == "d":
+            return "delete", None
+        if not existing and choice == "s":
+            return "skip", None
+        if choice == "r":
+            tmp_wav = os.path.join(session_dir, f"{number:03d}.wav")
+            while True:  # re-record loop: 'r' at the accept prompt stays in
+                         # here so a redo can't fall through to the outer
+                         # [Enter=keep,...] prompt and get silently discarded
+                         # by a plain Enter meant as "yes, accept that redo"
+                if not record_fn(tmp_wav, device_name, input_fn=input_fn):
+                    print("no audio captured — try again (mic permission? or "
+                          "waited too briefly before pressing Enter).")
+                    break  # back to the outer [Enter=keep, r=record, d=delete] prompt
+                play_fn(tmp_wav)
+                again = input_fn("[Enter=accept, r=redo] > ").strip().lower()
+                if again != "r":
+                    return "record", tmp_wav
+                # else: redo — record again immediately, same tmp_wav
+        elif existing:
+            print("unrecognized input; try 'r', 'd', or Enter.")
+        else:
+            print("unrecognized input; try 'r' or 's' — nothing recorded here "
+                 "yet, so Enter alone won't skip it.")
+
+
+def record_narration(source_path, manual_audio_dir, out_path, trace=True,
+                     every=False, subtitles=False, typing=False,
+                     typing_speed=TYPE_SPEED, pause=0.0, show_frame=True,
+                     build_after=True, input_fn=input,
+                     record_fn=_record_until_enter, play_fn=_play,
+                     frame_fn=None):
+    """
+    Interactively record narration for `source_path`, one take per unique
+    narration line, then render with `tts="manual"`.
+
+    Steps through every beat in playback order (pass 1 then pass 2, in
+    two-pass mode). A beat that would get its own recording under
+    `--tts manual` — the same unique, non-empty narration lines
+    `export_script()` numbers — plays back its existing recording, if any,
+    then prompts. The default (blank Enter) is deliberately
+    context-dependent — it can never be the reason a beat ends up with no
+    recording at all:
+
+    - Enter — keep what's there. Only offered when a recording already
+      exists; there being nothing to "keep" otherwise is the point.
+    - 'r'   — record a new take (Enter to stop), then Enter to accept or
+      'r' to redo.
+    - 'd'   — delete the existing recording (only offered when one exists).
+    - 's'   — leave a beat with no existing recording unrecorded for now
+      (only offered when there's nothing to keep — the explicit
+      alternative to Enter there).
+
+    A duplicate-text or silent beat is shown for context and skipped
+    automatically — it reuses an earlier number or needs no recording. If
+    any beat still has no recording once the walk finishes (skipped this
+    session, or never recorded in an earlier one), a summary is printed
+    and, on a clean finish, `build_after` is skipped rather than attempted
+    (`build(tts="manual")` would otherwise fail outright on the first one).
+
+    Nothing is written to `manual_audio_dir` until the whole walk finishes:
+    new takes are recorded to a scratch directory and deletions are staged,
+    committed together only once every beat has been visited. Ctrl+C at any
+    point (including mid-recording) aborts the session with no changes made.
+
+    On a clean finish, renders `out_path` from the SAME beats this session
+    walked (reusing their already-interpolated narration/state rather than
+    re-parsing and re-executing `source_path` — the interactive session
+    already ran it once; a snippet with real side effects, e.g. writes or
+    network calls, must not run twice for one `--record` session) unless
+    `build_after=False`.
+
+    Parameters
+    ----------
+    source_path, trace, every, subtitles, typing, typing_speed, pause :
+        Same as `build()`.
+    manual_audio_dir :
+        Directory holding (and to receive) `NNN.wav` recordings.
+    out_path :
+        Passed through to the final `build()` call.
+    show_frame :
+        Show each beat's rendered frame for visual context while recording
+        [default: True] — via `frame_fn`, or printed as a one-time note and
+        disabled for the rest of the session if `frame_fn` is left at its
+        default and `imgcat` isn't on PATH.
+    build_after :
+        Render the MP4 after a clean (non-aborted) session [default: True].
+    frame_fn :
+        `frame_fn(png_path)` displays one beat's rendered frame; defaults to
+        `_show_frame_imgcat` (terminal inline images via `imgcat`) if left
+        `None`. `magic.py`'s cell magic passes its own, showing the frame in
+        the notebook's cell output via `IPython.display.Image` instead.
+
+    Returns
+    -------
+    True if the session completed and committed (even with 0 changes);
+    False if aborted with Ctrl+C.
+
+    Uses `input()` throughout (no raw keypress handling), so it works the
+    same from a terminal or a notebook cell. macOS only for the recording
+    itself — capture, default-device detection, and playback all shell out
+    to macOS-only tools (system_profiler / ffmpeg avfoundation / afplay);
+    frame preview (imgcat, or a caller-supplied `frame_fn`) is not
+    macOS-specific.
+    """
+    if sys.platform != "darwin":
+        sys.exit("record: recording narration is currently macOS-only "
+                 "(uses system_profiler/avfoundation/afplay).")
+    os.makedirs(manual_audio_dir, exist_ok=True)
+
+    code_lines, beats1, beats2 = _build_all_beats(source_path, trace, every)
+    two_pass = bool(beats1)
+    final_pass1_revealed = beats1[-1].revealed if beats1 else None
+
+    if show_frame and frame_fn is None:
+        if shutil.which("imgcat") is None:
+            print("note: 'imgcat' not found on PATH — skipping frame previews "
+                 "(install imgcat for your terminal, e.g. iTerm2/WezTerm/Kitty, "
+                 "or pass show_frame=False to silence this).")
+            show_frame = False
+        else:
+            frame_fn = _show_frame_imgcat
+
+    cv = None
+    if show_frame:
+        cv = plan_canvas(code_lines, beats1 + beats2, show_panel=trace, subtitles=False)
+
+    device_name = _default_input_device()
+    session_dir = tempfile.mkdtemp(prefix="snippet_cast_record_")
+    preview_path = os.path.join(session_dir, "preview.png")
+    pending = {}   # number -> ("record", tmp_path) | ("delete", None)
+
+    try:
+        for pass_no, idx, beat, number, dup_of in _narration_sequence(beats1, beats2):
+            tag = f"[pass {pass_no}, beat {idx + 1}]"
+            if show_frame:
+                code_text = _preview_code_text(code_lines, pass_no, beat,
+                                              two_pass, final_pass1_revealed)
+                compose(cv, code_text, [beat.highlight] if beat.highlight else [],
+                       beat.state, None, preview_path)
+                frame_fn(preview_path)
+
+            if number is None:
+                status = f"(dup of #{dup_of:03d})" if dup_of is not None else "(silent)"
+                print(f"      {tag}  {status}  {beat.narration}")
+                continue
+
+            action, tmp_path = _decide_recording(
+                number, tag, beat.narration, manual_audio_dir, session_dir,
+                device_name, input_fn=input_fn, record_fn=record_fn, play_fn=play_fn)
+            if action not in ("keep", "skip"):
+                pending[number] = (action, tmp_path)
+    except KeyboardInterrupt:
+        print("\naborted — no changes written.")
+        shutil.rmtree(session_dir, ignore_errors=True)
+        return False
+
+    for number, (action, tmp_path) in pending.items():
+        if action == "delete":
+            existing = _find_recording(manual_audio_dir, number)
+            if existing:
+                os.remove(existing)
+        else:  # "record"
+            for ext in MANUAL_AUDIO_EXTS:
+                stale = os.path.join(manual_audio_dir, f"{number:03d}{ext}")
+                if os.path.exists(stale):
+                    os.remove(stale)
+            shutil.move(tmp_path, os.path.join(manual_audio_dir, f"{number:03d}.wav"))
+    shutil.rmtree(session_dir, ignore_errors=True)
+    print(f"{len(pending)} change(s) committed to {manual_audio_dir!r}.")
+
+    missing = sorted(
+        number for _, _, _, number, _ in _narration_sequence(beats1, beats2)
+        if number is not None and _find_recording(manual_audio_dir, number) is None)
+    if missing:
+        print(f"note: {len(missing)} beat(s) still have no recording: "
+             f"{', '.join(f'{n:03d}' for n in missing)}. Re-run --record to "
+             f"fill them in — a build with --tts manual will fail on the "
+             f"first one until then.")
+        if build_after:
+            print("skipping the auto-build until every beat has a recording.")
+            return True
+
+    if build_after:
+        synth = make_manual_backend(manual_audio_dir)
+        _render_from_beats(code_lines, beats1, beats2, out_path, "manual", synth,
+                           trace, every, subtitles, typing, typing_speed, pause)
+    return True
+
+
+ENV_PREFIX = "SNIPPET_CAST_"
+
+
+def _env_default(name, fallback):
+    """A `SNIPPET_CAST_<NAME>` environment variable as a default value, typed
+    to match `fallback` (bool/float/str), or `fallback` itself if unset."""
+    val = os.environ.get(ENV_PREFIX + name.upper())
+    if val is None:
+        return fallback
+    if isinstance(fallback, bool):
+        return val.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(fallback, float):
+        try:
+            return float(val)
+        except ValueError:
+            sys.exit(f"{ENV_PREFIX}{name.upper()}={val!r} is not a valid number.")
+    return val
+
+
+def resolve_env_defaults(args, **fallbacks):
+    """Fill in `args` fields left at their `None` sentinel (not passed on
+    the CLI / not given in a `%%snippet-cast` line) from `SNIPPET_CAST_<NAME>`
+    environment variables, falling back to `fallbacks[name]` if neither set
+    a value. An explicit flag always wins over the environment variable; the
+    environment variable always wins over the hardcoded fallback. Used by
+    both `main()` and `magic.py`'s cell magic — the latter needs this
+    resolved fresh on every cell run rather than baked into an
+    `@argument(default=...)`, since those decorators are only evaluated
+    once, at import time, not per invocation. Mutates and returns `args`."""
+    for name, fallback in fallbacks.items():
+        if getattr(args, name) is None:
+            setattr(args, name, _env_default(name, fallback))
+    return args
+
+
+def resolve_output_path(output, output_dir, name):
+    """The `-o/--output` path if given, else `output_dir/name.mp4` — and
+    makes sure the destination directory exists."""
+    out_path = output if output is not None else os.path.join(output_dir, f"{name}.mp4")
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    return out_path
 
 
 def main():
     """Console-script entry point (`snippet-cast`): parses argv and calls `build`."""
     ap = argparse.ArgumentParser(description="Narrated screencast from an annotated .py snippet.")
     ap.add_argument("input", help="annotated Python file")
-    ap.add_argument("-o", "--output", default="out.mp4")
-    ap.add_argument("--tts", choices=list(BACKENDS), default="say")
-    ap.add_argument("--no-trace", action="store_true",
-                    help="don't execute the snippet; skip the state panel")
-    ap.add_argument("--every", action="store_true",
+    ap.add_argument("-o", "--output", default=None, metavar="PATH",
+                    help="explicit output MP4 path — overrides -n/--name and "
+                         "-d/--output-dir if given")
+    ap.add_argument("-n", "--name", default=None, metavar="NAME",
+                    help="basename (without extension) for the output file in "
+                         "--output-dir, when -o/--output isn't given "
+                         "[default: out; env: SNIPPET_CAST_NAME]")
+    ap.add_argument("-d", "--output-dir", default=None, metavar="DIR",
+                    help="directory for the output file when -o/--output isn't "
+                         "given (created if missing) [default: current "
+                         "directory; env: SNIPPET_CAST_OUTPUT_DIR]")
+    ap.add_argument("--tts", choices=list(BACKENDS), default=None,
+                    help="TTS backend [default: say; env: SNIPPET_CAST_TTS]")
+    ap.add_argument("--no-trace", action="store_true", default=None,
+                    help="don't execute the snippet; skip the state panel "
+                         "[env: SNIPPET_CAST_NO_TRACE]")
+    ap.add_argument("--every", action=argparse.BooleanOptionalAction, default=None,
                     help="one beat per execution of a line (animates loops); "
-                         "full code is shown and the highlight follows execution")
-    ap.add_argument("--subtitles", action="store_true",
-                    help="burn the narration text as a caption (handy with --tts silent)")
-    ap.add_argument("--typing", action="store_true",
+                         "full code is shown and the highlight follows execution "
+                         "[env: SNIPPET_CAST_EVERY]")
+    ap.add_argument("--subtitles", action=argparse.BooleanOptionalAction, default=None,
+                    help="burn the narration text as a caption (handy with "
+                         "--tts silent) [env: SNIPPET_CAST_SUBTITLES]")
+    ap.add_argument("--typing", action=argparse.BooleanOptionalAction, default=None,
                     help="type newly revealed lines character-by-character "
-                         "(first-execution mode only)")
-    ap.add_argument("--typing-speed", type=float, default=TYPE_SPEED, metavar="SECONDS",
+                         "(first-execution mode only) [env: SNIPPET_CAST_TYPING]")
+    ap.add_argument("--typing-speed", type=float, default=None, metavar="SECONDS",
                     help="seconds to reveal each newly typed character; larger is "
-                         f"slower [default: {TYPE_SPEED}]")
-    ap.add_argument("--pause", type=float, default=0.0, metavar="SECONDS",
+                         f"slower [default: {TYPE_SPEED}; env: SNIPPET_CAST_TYPING_SPEED]")
+    ap.add_argument("--pause", type=float, default=None, metavar="SECONDS",
                     help="seconds of silence to hold on each beat's frame after "
                          "its narration finishes, before the next beat begins "
-                         "[default: 0]")
-    ap.add_argument("--export-script", action="store_true",
+                         "[default: 0; env: SNIPPET_CAST_PAUSE]")
+    ap.add_argument("--export-script", action=argparse.BooleanOptionalAction, default=None,
                     help="print the ordered, numbered narration script and exit "
                          "(no rendering, no ffmpeg/ffprobe needed) — redirect it "
-                         "yourself, e.g. --export-script > script.txt")
-    ap.add_argument("--manual-audio-dir", metavar="DIR",
+                         "yourself, e.g. --export-script > script.txt "
+                         "[env: SNIPPET_CAST_EXPORT_SCRIPT]")
+    ap.add_argument("--manual-audio-dir", default=None, metavar="DIR",
                     help="directory of pre-recorded audio for --tts manual, named "
                          "001.wav, 002.wav, ... (or .mp3/.m4a/.aiff/.flac/.ogg) "
-                         "matching --export-script's numbering")
+                         "matching --export-script's numbering "
+                         "[env: SNIPPET_CAST_MANUAL_AUDIO_DIR]")
+    ap.add_argument("--record", action=argparse.BooleanOptionalAction, default=None,
+                    help="interactively record narration via the system microphone "
+                         "(macOS only), then build with --tts manual — requires "
+                         "--manual-audio-dir DIR; see SETUP.md [env: SNIPPET_CAST_RECORD]")
+    ap.add_argument("--no-frame", action="store_true", default=None,
+                    help="with --record, don't pop each beat's rendered frame in "
+                         "the system image viewer [env: SNIPPET_CAST_NO_FRAME]")
 
     piper = ap.add_argument_group(
         "piper options", "override the PIPER_* environment variables (see synth_piper)")
@@ -1441,6 +1920,14 @@ def main():
                         help="output_format [env: ELEVENLABS_FORMAT]")
 
     args = ap.parse_args()
+    resolve_env_defaults(
+        args, tts="say", no_trace=False, every=False, subtitles=False, typing=False,
+        typing_speed=TYPE_SPEED, pause=0.0, export_script=False,
+        manual_audio_dir=None, record=False, no_frame=False,
+        name="out", output_dir=".")
+    if args.tts not in BACKENDS:
+        sys.exit(f"--tts: invalid choice {args.tts!r} (choose from {', '.join(BACKENDS)})")
+
     if args.every and args.no_trace:
         sys.exit("--every needs execution; drop --no-trace.")
     if args.typing and args.every:
@@ -1449,8 +1936,10 @@ def main():
         sys.exit("--pause must be >= 0.")
     if args.typing_speed <= 0:
         sys.exit("--typing-speed must be > 0.")
-    if args.manual_audio_dir and args.tts != "manual":
-        sys.exit("--manual-audio-dir only applies with --tts manual.")
+    if args.manual_audio_dir and args.tts != "manual" and not args.record:
+        sys.exit("--manual-audio-dir only applies with --tts manual (or --record).")
+    if args.record and not args.manual_audio_dir:
+        sys.exit("--record requires --manual-audio-dir DIR.")
 
     if args.export_script:
         for line in export_script(args.input, trace=not args.no_trace, every=args.every):
@@ -1476,7 +1965,17 @@ def main():
         if value is not None:
             os.environ[env_var] = value
 
-    build(args.input, args.output, args.tts,
+    out_path = resolve_output_path(args.output, args.output_dir, args.name)
+
+    if args.record:
+        record_narration(args.input, args.manual_audio_dir, out_path,
+                         trace=not args.no_trace, every=args.every,
+                         subtitles=args.subtitles, typing=args.typing,
+                         typing_speed=args.typing_speed, pause=args.pause,
+                         show_frame=not args.no_frame)
+        return
+
+    build(args.input, out_path, args.tts,
           trace=not args.no_trace, every=args.every,
           subtitles=args.subtitles, typing=args.typing,
           typing_speed=args.typing_speed, pause=args.pause,

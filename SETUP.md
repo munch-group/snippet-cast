@@ -1,8 +1,9 @@
-# TTS setup — Piper (local) and ElevenLabs (cloud)
+# TTS setup — say, manual, Piper (local), and ElevenLabs (cloud)
 
-Both backends are already wired into `snippet_cast.screencast`; you select one with
-`--tts piper` or `--tts elevenlabs`. You never manage audio formats yourself:
-whatever a backend emits (Piper `.wav`, ElevenLabs `.mp3`) is re-encoded to AAC
+All four backends are already wired into `snippet_cast.screencast`; you select
+one with `--tts say` / `--tts manual` / `--tts piper` / `--tts elevenlabs`. You
+never manage audio formats yourself: whatever a backend emits (macOS `.aiff`,
+Piper `.wav`, ElevenLabs `.mp3`, or your own recordings) is re-encoded to AAC
 and normalised to 44.1 kHz stereo, so it concatenates cleanly with the silent
 typing clips.
 
@@ -11,6 +12,183 @@ narration string**. A loop line without interpolation is spoken once and reused
 every iteration; a line with `{i}` differs each time and is synthesised (and, on
 ElevenLabs, billed) each time. So proof your script first with the free
 `--tts silent --subtitles`, then render once with a real voice.
+
+---
+
+## say — macOS built-in, zero setup
+
+`--tts say` shells out to the `say` command that ships with macOS. Nothing to
+install, nothing to configure, and it's the CLI's default backend
+(`main()`'s `--tts` defaults to `"say"`) — so on a Mac, `snippet-cast fib.py -o
+out.mp4` with no `--tts` flag at all already gives you real speech, not just
+timing.
+
+```bash
+snippet-cast fib.py -o out.mp4 --tts say
+```
+
+It uses whatever voice is set as the system default (System Settings →
+Accessibility → Spoken Content → System Voice); `synth_say()` doesn't expose a
+`--say-voice`/rate flag, so every line gets the same voice at the same rate.
+If you want a different voice, a different rate, per-line control, or
+inline `say` markup (`[[slnc 300]]`, `[[rate 170]]`, …), don't reach for
+`--tts say` — drive `say` yourself with the **manual** backend below.
+
+Linux/Windows have no `say` binary; use `--tts silent` for a free proofing
+pass there instead, and Piper/ElevenLabs for a real voice.
+
+## manual — recording narration yourself
+
+`--tts manual` doesn't synthesize anything — it plays back audio files you
+already have, one per unique narration line, in the exact order `build()`
+requests them. Use it for a human voiceover, or to drive `say` (or any other
+tool) by hand, line by line, with full control snippet-cast's other backends
+don't give you.
+
+### 1. Export the narration script
+
+```bash
+snippet-cast fib.py --export-script > script.txt
+```
+
+This needs no ffmpeg/ffprobe and doesn't render anything — it just prints the
+numbered lines `build()` will ask a TTS backend for, e.g.:
+
+```
+001  [pass 2, beat 1]  Let's trace an iterative Fibonacci function as it runs.
+002  [pass 2, beat 2]  The first line names the fib-function and defines its parameters...
+003  [pass 2, beat 3]  Start from the first two Fibonacci numbers, zero and one.
+...
+```
+
+Only unique narration text gets a number — an identical repeated line (e.g. an
+un-interpolated loop line) shows as `(dup of #NNN)` and reuses that earlier
+recording; don't record it again. A beat with no narration shows as
+`(silent)` and needs no file at all.
+
+### 2. Produce one audio file per number
+
+Save each as `001.<ext>`, `002.<ext>`, ... in any directory — `.wav`, `.mp3`,
+`.m4a`, `.aiff`, `.flac`, or `.ogg` are all accepted.
+
+**With a real microphone:** record and export each line with any audio editor
+(Audacity, GarageBand, `ffmpeg`, ...), matching the script's numbering.
+
+**With `say`, driven by hand (macOS):** call `say` yourself once per numbered
+line instead of letting `--tts say` do it automatically — this is how you get
+a specific voice, rate, or inline pause/emphasis markup per line:
+
+```bash
+mkdir -p audio
+say -v Samantha -r 190 -o audio/001.aiff "Let's trace an iterative Fibonacci function as it runs."
+say -v Samantha -r 190 -o audio/002.aiff "The first line names the fib-function and defines its parameters..."
+say -v Samantha -r 150 -o audio/003.aiff "Start from the first two Fibonacci numbers,[[slnc 200]] zero and one."
+```
+
+(`say -v ?` lists installed voices.) Re-run just the one `say` command for a
+line you want to redo — no need to touch the others or re-run snippet-cast.
+
+### 3. Render
+
+```bash
+snippet-cast fib.py -o out.mp4 --tts manual --manual-audio-dir audio/
+```
+
+`build()`/the CLI reject `--manual-audio-dir` without `--tts manual`, and
+`--tts manual` without `--manual-audio-dir`. If a numbered file is missing,
+the error names the exact stem and narration text it was expecting, e.g.
+`manual backend: missing recording 003.* in 'audio/' (narration: '...'). Run
+--export-script for the numbered list this needs to match.` — re-running
+`--export-script` after any edit to the snippet's `#:` narration is the fix,
+since renumbering follows straight from the source.
+
+### Recording live via the microphone (`--record`, macOS)
+
+Steps 1–3 above, done interactively, with your own voice, straight into the
+terminal or a notebook cell — no separate script export, no external editor:
+
+```bash
+snippet-cast fib.py -o out.mp4 --record --manual-audio-dir audio/
+```
+
+or, from Python/a notebook:
+
+```python
+from snippet_cast import record_narration
+record_narration("fib.py", "audio/", "out.mp4")
+```
+
+or, in the `%%snippet-cast` cell magic (`--tts` is ignored — `--record` always
+targets the manual backend):
+
+```
+%%snippet-cast --record --manual-audio-dir audio/
+def fib(n):             #: We define fib, taking one argument, n.
+    ...
+```
+
+The prompts below appear as normal inline input boxes in the notebook,
+exactly as in a terminal — nothing notebook-specific to know.
+
+It steps through every beat in order, showing each one's rendered frame for
+context (skip with `--no-frame`), and prompts only where a recording
+actually matters — a duplicate or silent beat is shown and skipped
+automatically. In a terminal this is via
+[`imgcat`](https://iterm2.com/utilities/imgcat) (any iTerm2/WezTerm/Kitty-style
+setup that provides one; without it on PATH, previews are silently skipped
+with a one-time note, not a hard failure). **In a notebook, the frame and
+the status text each update a single cell output in place** — one live
+"current frame" area and one live "current status" area — rather than a new
+output block piling up per beat, so a long session doesn't turn into a wall
+of scrollback.
+
+At each numbered beat,
+**what Enter does depends on whether a recording already exists there** —
+it's never the reason a beat ends up with none:
+
+```
+003  [pass 2, beat 3]  Start from the first two Fibonacci numbers, zero and one.
+[Enter=keep, r=record, d=delete] >
+```
+
+- **Enter** — keep the existing recording. Only offered when one exists;
+  with nothing to keep, a blank Enter is rejected (re-prompts) rather than
+  silently leaving the beat unrecorded.
+- **r** — record from your system's current default input device (whatever
+  you have selected in System Settings → Sound → Input) until you hit Enter,
+  play it back, then Enter to accept or `r` to redo.
+- **d** — delete the existing recording (only offered when one exists).
+- **s** — explicitly leave a beat with no existing recording unrecorded for
+  now (only offered when there's nothing to keep — the deliberate
+  alternative to Enter there):
+
+```
+005  [pass 2, beat 5]  Advance the pair — b becomes the running sum.
+[r=record, s=skip for now] >
+```
+
+If any beat still has no recording once you've been through all of them —
+skipped this session, or never recorded in an earlier one — a summary lists
+them and the automatic build is skipped rather than attempted (it would
+otherwise fail outright on the first missing one); re-run `--record` to fill
+them in.
+
+Nothing touches `audio/` until you've been through every beat: new takes
+land in a scratch directory and deletions are staged, committed together
+only on a clean finish. **Ctrl+C at any point — including mid-recording —
+aborts the whole session with no changes made.** On a clean finish it
+renders the MP4 automatically, same as a normal `--tts manual` run.
+
+This is also the natural way to fix a stale recording after editing a
+snippet's `#:` narration: re-run `--record`, listen to what plays back at
+each beat, and `r`/`d` just the ones that no longer match — everything else
+is a single Enter.
+
+The recording itself is macOS only (mic capture, default-device detection,
+and playback shell out to macOS tools: `system_profiler`, `ffmpeg
+avfoundation`, `afplay`) — elsewhere, use `--tts manual` with recordings made
+some other way (see above). Frame preview isn't macOS-specific (notebook
+display and `imgcat` both work cross-platform).
 
 ---
 
@@ -179,16 +357,17 @@ default mp3 is more than enough; there's no quality reason to change it.
 
 ## Which backend?
 
-| | Piper | ElevenLabs |
-|---|---|---|
-| Runs | Offline, on your CPU | Cloud API |
-| Cost | Free | Per character |
-| Quality | Good | Best / most expressive |
-| Network | Only first download | Every render |
-| Best for | Iterating, privacy, bulk | The final take |
+| | say | manual | `--record` | Piper | ElevenLabs |
+|---|---|---|---|---|---|
+| Runs | macOS built-in | Your own files | macOS mic, live | Offline, on your CPU | Cloud API |
+| Cost | Free | Free (your time) | Free (your time) | Free | Per character |
+| Setup | None | None | None | One-time voice download | API key |
+| Quality | OK, one fixed voice | Whatever you record | Whatever you record | Good | Best / most expressive |
+| Best for | Quick real-speech proof on a Mac | Human voiceover, or per-line `say` control | Recording your own voiceover interactively | Iterating, privacy, bulk | The final take |
 
 A practical workflow: **draft** with `--tts silent --subtitles`, **iterate** with
-`--tts piper`, **finish** with `--tts elevenlabs`.
+`--tts piper` (or `--tts say` on a Mac), **finish** with `--tts elevenlabs` or
+your own recording via `--tts manual`.
 
 ## Adding another provider (OpenAI, Azure, etc.)
 

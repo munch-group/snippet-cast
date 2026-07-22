@@ -60,9 +60,9 @@ manual recipe used to sanity-check rendered video output.
 | Path | Purpose |
 |---|---|
 | `src/snippet_cast/screencast.py` | The entire tool (~700 lines): parse → trace → beats → render → TTS → assemble. |
-| `src/snippet_cast/__init__.py` | Public API: exports `build` (programmatic), `export_script`, and `main` (CLI entry point). |
-| `src/snippet_cast/magic.py` | Jupyter `%%snippet-cast` cell magic (`pip install snippet-cast[jupyter]`, `%load_ext snippet_cast.magic`). Deliberately **not** imported from `__init__.py`, so `import snippet_cast` never requires IPython — it's a thin wrapper: writes the cell to a temp `.py` file, calls `build()`/`export_script()`, displays the result with `IPython.display.Video`. |
-| `SETUP.md` | How to install/configure the Piper and ElevenLabs TTS backends. |
+| `src/snippet_cast/__init__.py` | Public API: exports `build` (programmatic), `export_script`, `record_narration`, and `main` (CLI entry point). |
+| `src/snippet_cast/magic.py` | Jupyter `%%snippet-cast` cell magic (`pip install snippet-cast[jupyter]`; `import snippet_cast.magic` auto-registers it inside a live kernel, or use `%load_ext snippet_cast.magic`). Deliberately **not** imported from `__init__.py`, so `import snippet_cast` never requires IPython — it's a thin wrapper: writes the cell to a temp `.py` file, calls `build()`/`export_script()`/`record_narration()`, displays the result with `IPython.display.Video`. `--record`'s `input()` prompts work the same in a notebook cell as a terminal — no special-casing needed. |
+| `SETUP.md` | How to configure every TTS backend (`say`, `manual`/`--record`, Piper, ElevenLabs). |
 | `test/data/fib.py`, `test/data/loop.py`, `test/data/twopass.py` | Sample annotated snippets used by tests and for manual verification (`twopass.py` exercises `/`-split, two-pass narration). |
 | `test/test_screencast.py` | Automated tests: parsing, tracing, beat construction, and a full-render smoke test. |
 | `*.mp4` | Generated outputs (not source; safe to delete / gitignore). |
@@ -115,10 +115,9 @@ which calls the *unmodified* `build_beats()` **twice**: once with
 `steps=[]` (part1 text; forces `state={}` everywhere, since `first.get(...)`
 always misses) for **pass 1** ("writing" — always typed, via
 `make_pass1_code_clip()`/`probe_duration()`, narration and typing start
-together, opening on a blank canvas (`typing_frames()`'s `start_blank` path),
-and the clip is sized to the narration's real duration), and once with the
-real `steps` (part2 text) for **pass 2** ("walkthrough" — same per-beat
-highlight/state/narration as single-pass first-exec mode, but
+together, opening on a blank canvas (`typing_frames()`'s `start_blank` path)),
+and once with the real `steps` (part2 text) for **pass 2** ("walkthrough" —
+same per-beat highlight/state/narration as single-pass first-exec mode, but
 `_render_two_pass()` deliberately ignores each beat's `revealed` here and
 always composes the full code pass 1 already typed (`_visible_code(code_lines,
 final_revealed)`, `final_revealed = beats1[-1].revealed`) — only the
@@ -127,6 +126,22 @@ re-revealed). `_render_two_pass()` renders all of pass 1 then all of pass 2,
 concatenated into one video. A file with no `/` anywhere never takes this
 branch — the original single-pass loop in `build()` is untouched, so behavior
 for existing snippets doesn't change.
+
+Pass 1's typed reveal is paced by `typing_speed`, same as legacy `--typing`
+(capped at `TYPE_MAXFRAMES`) — `make_pass1_code_clip()` no longer lets a real
+narration's `probe_duration()` silently override that pace outright (a prior
+bug: `--typing-speed` had zero effect whenever pass 1 had non-empty
+narration, since frame count was `ceil(duration * FPS)` with characters
+spread evenly across ALL of it). `duration` is now only a FLOOR: if typing
+finishes before the narration does, the fully-typed frame is padded with
+duplicate frame files for the remainder (never truncating narration, per
+invariant 10); if `typing_speed` would need MORE time than the narration
+provides, the reveal is — same as before this fix — cut short by
+`make_typing_clip`'s `-shortest` at the real audio length. `--pause` applies
+**within both passes** (a duplicated prior bug: only pass 2's loop had pause
+logic at all) via the same "no trailing pause" guard (`k < len(beatsN) - 1`)
+in each pass independently — no pause is inserted at the pass-1-to-pass-2
+transition itself, nor after the video's final beat.
 
 #### Custom narration order (first-exec only, orthogonal to two-pass)
 
@@ -251,6 +266,175 @@ manual backend's file-numbering aligned with `export_script()`'s (see
 first-seen-narration-text rule, so the Nth unique line in the exported script
 is always the Nth call to the manual backend).
 
+`build()`, `export_script()`, and `record_narration()` all share one parse ->
+two-pass-detect -> validate -> trace -> beats preamble, `_build_all_beats(source_path,
+trace, every) -> (code_lines, beats1, beats2)` — the single source of truth for
+two-pass detection and the `every`+two-pass / `every`+order-prefix validation
+`sys.exit`s. `build()`'s render half (everything after that preamble) is its
+own function, `_render_from_beats(code_lines, beats1, beats2, out_path, tts,
+synth, trace, every, subtitles, typing, typing_speed, pause)` — `build()` is
+just `_build_all_beats()` then `_render_from_beats()`. This split exists so
+`record_narration()`'s `build_after` step can call `_render_from_beats()`
+directly with the SAME `beats1`/`beats2` its interactive session already
+built, instead of calling `build()` (which would call `_build_all_beats()`
+again — a second `trace_run()`, i.e. a second full execution of the user's
+snippet, confirmed to happen in an earlier version: a print in the snippet
+showed up twice in one `--record` session's output). `_format_script()` and
+`record_narration()` also share `_narration_sequence(beats1, beats2)`, a
+generator yielding `(pass_no, beat_idx, beat, number, dup_of)` per beat —
+`number` is the same 1-based, first-seen-unique-narration numbering the
+manual backend consumes; `None` means the beat needs no recording of its own
+(silent, or `dup_of` an earlier number). Anything that needs to walk "exactly
+the beats `--tts manual` requests audio for" should build on
+`_narration_sequence()`, not re-derive the dedup rule.
+
+**`--record`** (`record_narration()`) interactively records narration for the
+manual backend via the system microphone — macOS only for the recording
+itself, no new dependency (shells out to `system_profiler`/`ffmpeg -f
+avfoundation`/`afplay`, the same subprocess pattern as everything else in
+this file). It walks `_narration_sequence()`, prompting only at beats with a
+`number` (dup/silent beats are shown for context and skipped automatically),
+and stages every change (new recordings to a session tempdir, deletions
+deferred) so nothing touches `manual_audio_dir` until the whole walk
+finishes without a Ctrl+C — an abort at any point, including mid-recording,
+discards the session. Uses `input()` throughout (no raw keypress handling)
+so the same code works from a terminal or a notebook cell — `magic.py`'s
+cell magic wires `--record` straight to it too.
+
+`_decide_recording()`'s default (blank Enter) is deliberately
+context-dependent, not a fixed mapping: with an existing recording, Enter
+means 'keep' (safe — something real is being kept). With NO existing
+recording there is nothing to keep, so Enter is rejected there (re-prompts)
+rather than silently returning `("keep", None)` — leaving a beat unrecorded
+now requires the explicit `'s'` (skip). This was a real bug, not
+hypothetical: `build(tts="manual")` (via `make_manual_backend()`) fails
+outright — a plain `sys.exit` — on the first beat with no numbered file, and
+a blank Enter used to be a silent way to end up in exactly that state.
+`record_narration()` also does a final sweep after the walk (re-running
+`_narration_sequence()` — cheap, no I/O) for any number still missing a
+recording (skipped this session, or from an earlier one); if any remain, it
+prints an itemized note and skips `build_after` rather than letting it hit
+that same `sys.exit` — the auto-build silently attempting and failing was
+the actual symptom that surfaced this whole issue.
+
+Frame preview (`show_frame`) is injectable via `frame_fn(png_path)`, same
+pattern as `input_fn`/`record_fn`/`play_fn` — this is how one function
+serves two very different display contexts without `screencast.py` ever
+importing IPython (a hard constraint — see "Conventions"): left at its
+default `None`, `record_narration()` resolves it to `_show_frame_imgcat`
+(shells out to `imgcat`, common across iTerm2/WezTerm/Kitty-style
+terminals) if `imgcat` is on PATH, else prints a one-time note and disables
+`show_frame` for the rest of the session rather than failing it over a
+visual nicety.
+
+`magic.py` passes its own `_LiveRecordView` instance instead — status text
+and the current frame each update ONE existing cell output in place (via
+`IPython.display`'s `display_id`/`DisplayHandle.update()`) instead of a
+fresh `display()` per beat piling up as a growing stack of separate
+outputs (the original `_show_frame_notebook`, one plain `display(Image(...))`
+call per beat with no `display_id`, had exactly that problem — replaced).
+One object serves two roles: it's `frame_fn` directly (`__call__(path)`),
+and `contextlib.redirect_stdout(view)` wraps the whole `record_narration()`
+call so its `write()`/`flush()` also capture every `print()`
+`screencast.py` makes, keeping a short rolling window (`max_lines`) instead
+of unbounded scrollback. **Recursion hazard, already hit and fixed**: don't
+call `display()`/`.update()` from `write()`/`__call__` while `sys.stdout` is
+*still* redirected to the same object — if `display()`'s own internals
+happen to write anything to stdout, that write loops back into `write()`
+again (observed as `RecursionError` deep in
+`IPython.core.display_functions.display`, wrapped in IPython's "Unexpected
+exception formatting exception" handler, which obscures the real cause).
+Fixed by capturing `self._real_stdout = sys.stdout` in `__init__` — *before*
+the caller wraps it — and temporarily restoring that specific object (not
+`sys.__stdout__`, which bypasses ipykernel's own stdout routing and
+wouldn't land in the cell) around each `display()`/`.update()` call.
+
+Two bugs worth knowing if you touch
+`_decide_recording()`/`_record_until_enter()`, both confirmed via a real
+`--record` session, not just reasoning about the code:
+1. Sending SIGINT before ffmpeg has finished opening the device can produce
+   **no output file at all**. `_record_until_enter()` polls for the file to
+   appear before honoring the stop, and returns `False` (instead of leaving a
+   broken file for `shutil.move` to choke on later) if a take still comes up
+   empty; `_decide_recording()` sends that back to the *outer*
+   `[Enter=keep, r=record, d=delete]` prompt.
+2. Typing `r` (redo) at the `[Enter=accept, r=redo]` prompt must loop back
+   into another recording attempt for the SAME beat, in its OWN inner loop —
+   it must never fall through to that same outer prompt, because a plain
+   Enter there (typed to confirm the redo, not realizing it landed on a
+   different prompt) reads as "keep the recording that already exists" (none,
+   for a first take), silently discarding the just-recorded audio with no
+   error. This exact sequence — record, redo, Enter — was reproduced live: a
+   2-beat session recorded both beats, committed only one, and the follow-up
+   build failed with a missing-recording error for the discarded one.
+
+`_record_until_enter()`'s ffmpeg call uses `-loglevel error` and reads
+`stderr=subprocess.PIPE` once at the end on failure (surfacing ffmpeg's own
+error — e.g. a mic permission problem — instead of silently discarding it).
+The `-loglevel error` is load-bearing, not cosmetic: ffmpeg's default
+verbosity writes continuous progress lines to stderr for the whole capture,
+and since that pipe is drained only once at the end, an unsuppressed stream
+would risk filling the OS pipe buffer and stalling a long recording (verified
+`-loglevel error` produces zero stderr bytes on a normal capture). Also bails
+out of `input_fn()` entirely if ffmpeg has already exited by the time the
+startup poll finishes (e.g. permission denied) — waiting on Enter for a
+recording that's already dead is pure confusion, not a real "press Enter to
+stop" moment. Microphone permission on macOS is granted **per application**:
+a terminal being allowed doesn't mean a notebook's host app (VS Code, Jupyter
+Desktop, ...) is — check System Settings -> Privacy & Security -> Microphone
+for whichever app is actually running the kernel if `--record` seems to hang
+or hit repeated failures with no clear cause.
+
+`_record_until_enter()` prints `"starting microphone..."` immediately, then
+only prints `"recording — press Enter to stop."` once the startup poll has
+actually confirmed capture began (the file exists) or bails to the failure
+path — not immediately after the ffmpeg `Popen`, which would claim
+"recording" before capture had necessarily started.
+
+### CLI / notebook configuration: SNIPPET_CAST_* environment variables
+
+Every `main()`/`%%snippet-cast` option **except `-o`/`--output`** has a
+`SNIPPET_CAST_<NAME>` environment variable default (e.g. `SNIPPET_CAST_PAUSE`,
+`SNIPPET_CAST_TTS`, `SNIPPET_CAST_NO_TRACE`) — precedence is explicit flag >
+env var > hardcoded fallback. `resolve_env_defaults(args, **fallbacks)`
+(shared by both `main()` and `magic.py`) fills in any `args` field still at
+its `None` sentinel from `os.environ`; `_env_default()` types the raw string
+against the fallback's Python type (`bool`/`float`/else `str`), with a
+truthy-string set (`1`/`true`/`yes`/`on`) for booleans. `main()`'s
+`add_argument(...)` calls all use `default=None` (never a literal default)
+specifically so this resolution step is the single source of truth — a
+literal `default=` there would silently never get overridden by the env var.
+
+**Why `magic.py` can't just use argparse's own `default=`, unlike `main()`:**
+`@magic_arguments()`/`@argument(...)` decorate the `snippet_cast` *method*,
+so those decorator calls (including any `default=...`) run exactly once, at
+class-body evaluation — i.e. module *import* time — not fresh per cell
+execution the way `main()`'s `ArgumentParser()` (built fresh inside the
+function body) is. A literal `os.environ.get(...)` in a decorator's
+`default=` would only ever see the environment as it was when
+`snippet_cast.magic` was first imported — silently ignoring an env var set
+in a *later* cell, exactly the documented workflow
+(`os.environ["SNIPPET_CAST_PAUSE"] = "0.6"` in one cell, `%%snippet-cast` in
+the next). `resolve_env_defaults()` is instead called from inside the method
+body, which *does* run fresh every cell — the fix.
+
+Boolean flags (`--every`, `--subtitles`, `--typing`, `--record`,
+`--export-script`) use `argparse.BooleanOptionalAction` (confirmed to work
+through IPython's `magic_arguments`/`parse_argstring`, not just plain
+argparse) so an env-var-forced-on default can still be turned back off for
+one run via `--no-X` — in both `main()` and `magic.py`, kept in sync.
+`--no-trace`/`--no-frame` are the exception: already negatively named, so
+`BooleanOptionalAction` would produce an ugly `--no-no-trace`; they stay
+plain `store_true` with `default=None`, resolved the same way — an env var
+can force them on, with no CLI opt-out beyond not passing the flag /
+env var (documented limitation, not a bug).
+
+`-n/--name` (default `"out"`) and `-d/--output-dir` (default `.`, created if
+missing) build the output path as `output_dir/name.mp4` via
+`resolve_output_path()`; `-o/--output`, if given, overrides both outright and
+has no env var of its own (SNIPPET_CAST_OUTPUT_DIR + SNIPPET_CAST_NAME
+already cover the "change my default output location" case without one).
+
 ### Verifying changes
 
 After any edit, run this sequence and eyeball a couple of frames:
@@ -330,12 +514,29 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   `_format_script()`) and `--tts manual` (`make_manual_backend()`) — see the
   "Two-pass narration" architecture note above for how their numbering stays
   aligned with `build()`'s own audio-request order.
+- **Interactive recording (`--record`):** `record_narration()` — see the "TTS
+  backends" architecture note above. New CLI flags for it need a matching
+  `@argument(...)` in both `main()` and `magic.py`'s cell magic (same rule as
+  every other flag — see below); the microphone/playback/preview steps are
+  each a small standalone function (`_default_input_device()`,
+  `_record_until_enter()`, `_play()`, `_preview_code_text()`) with
+  injectable `input_fn`/`record_fn`/`play_fn` params specifically so the
+  keep/record/delete/abort control flow is unit-testable without real audio
+  hardware — extend that pattern rather than inlining new I/O calls directly
+  into `record_narration()`'s loop.
 - **Jupyter `%%snippet-cast` cell magic:** lives in `src/snippet_cast/magic.py`
-  (`SnippetCastMagics`, loaded via `%load_ext snippet_cast.magic`). It's a thin
-  wrapper — writes the cell body to a temp `.py` file and calls `build()`/
-  `export_script()` unchanged, so new CLI flags/backends need a matching
-  `@argument(...)` added there to be reachable from a notebook, but need no
-  logic changes.
+  (`SnippetCastMagics`). `import snippet_cast.magic` auto-registers it when
+  run inside a live kernel (module-level `get_ipython()` check calls
+  `load_ipython_extension()` itself); `%load_ext snippet_cast.magic` still
+  works and is the only option outside a live kernel or to force
+  re-registration under autoreload. It's a thin wrapper — writes the cell
+  body to a temp `.py` file and calls `build()`/`export_script()` unchanged,
+  so new CLI flags/backends need a matching `@argument(...)` added there to
+  be reachable from a notebook, but need no logic changes. A new option also
+  needs a matching `default=None` + entry in both `main()`'s and
+  `snippet_cast()`'s `resolve_env_defaults(...)` call (its hardcoded
+  fallback) to get a `SNIPPET_CAST_*` environment variable default — see
+  "CLI / notebook configuration" above.
 
 ### Known limitations / candidate next steps
 

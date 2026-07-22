@@ -71,8 +71,38 @@ result = fib(7)          #: Call fib with seven; result becomes {result}.
 The cell magic takes the same flags as the CLI and displays the rendered MP4
 inline.
 
-See [SETUP.md](SETUP.md) for configuring the Piper (local) and ElevenLabs
-(cloud) text-to-speech backends, and `snippet-cast --help` for all options.
+See [SETUP.md](SETUP.md) for all TTS backends — the zero-setup `say` (macOS)
+and `manual` (your own recordings, including `--record` for recording live
+via the microphone) backends, plus configuring Piper (local) and ElevenLabs
+(cloud) — and `snippet-cast --help` for all options.
+
+## Configuration
+
+`-o`/`--output` sets an explicit path; without it, `-n`/`--name` (default
+`out`) and `-d`/`--output-dir` (default `.`, created if missing) build one as
+`output-dir/name.mp4`:
+
+```bash
+snippet-cast snippet.py --tts silent -n intro -d ./videos   # -> ./videos/intro.mp4
+```
+
+Every option (except `-o`/`--output`) also has a `SNIPPET_CAST_<NAME>`
+environment variable default — an explicit flag always wins over its env
+var:
+
+```python
+import os
+os.environ["SNIPPET_CAST_TTS"] = "say"
+os.environ["SNIPPET_CAST_SUBTITLES"] = "1"
+os.environ["SNIPPET_CAST_PAUSE"] = "0.6"
+os.environ["SNIPPET_CAST_OUTPUT_DIR"] = "./videos"
+```
+
+set in one notebook cell, applies to every `%%snippet-cast` cell after it
+(picked up fresh each time, so setting it in a later cell still works).
+Toggle flags (`--every`, `--subtitles`, `--typing`, `--record`,
+`--export-script`) accept `--no-X` to override an env-var-forced default back
+off for one run.
 
 ## Development
 
