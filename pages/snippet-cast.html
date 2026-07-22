@@ -61,7 +61,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </style>
 
 
-<script src="https://cdn.jsdelivr.net/npm/jquery@3.5.1/dist/jquery.min.js" integrity="sha384-ZvpUoO/+PpLXR1lu4jmpXWu80pZlYUAfxl5NsBMWOEPSjUn/6Z/hRTt8+pR6L4N2" crossorigin="anonymous"></script><script src="../site_libs/quarto-nav/quarto-nav.js"></script>
+<script src="../site_libs/quarto-nav/quarto-nav.js"></script>
 <script src="../site_libs/quarto-nav/headroom.min.js"></script>
 <script src="../site_libs/clipboard/clipboard.min.js"></script>
 <script src="../site_libs/quarto-search/autocomplete.umd.js"></script>
@@ -105,9 +105,6 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
     "search-label": "Search"
   }
 }</script>
-<script src="https://cdn.jsdelivr.net/npm/requirejs@2.3.6/require.min.js" integrity="sha384-c9c+LnTbwQ3aujuU7ULEPVvgLs+Fn6fJUvIGTsuu1ZcCf11fiEubah0ttpca4ntM sha384-6V1/AdqZRWk1KAlWbKBlGhN7VG4iE/yAZcO6NZPMF8od0vukrvr0tg4qY6NSrItx" crossorigin="anonymous"></script>
-
-<script type="application/javascript">define('jquery', [],function() {return window.jQuery;})</script>
 
 
 <link rel="stylesheet" href="../api/_styles-quartodoc.css">
@@ -162,97 +159,71 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 
 
 
-<div id="95ef1271" class="cell" data-execution_count="1">
+<div id="95ef1271" class="cell">
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> os</span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>os.environ[<span class="st">'PIPER_MODEL'</span>] <span class="op">=</span> <span class="st">'/home/kmt/bioinformatics/en_US-lessac-medium.onnx'</span>   <span class="co"># … or a local .onnx path</span></span>
-<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>os.environ[<span class="st">'PIPER_LENGTH_SCALE'</span>] <span class="op">=</span> <span class="st">'1.5'</span>             <span class="co"># speaking rate: &gt;1 slower, &lt;1 faster</span></span>
-<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>os.environ[<span class="st">'PIPER_DATA_DIR'</span>] <span class="op">=</span> <span class="st">'/home/kmt/bioinformatics'</span>      <span class="co"># where you downloaded voices to (must match --download-dir above)</span></span>
-<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="co">#os.environ['PIPER_BIN'] = /opt/piper/piper         # if the binary isn't just "piper"</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> snippet_cast.magic</span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="co"># os.environ['PIPER_MODEL'] = './en_US-lessac-medium.onnx'   # … or a local .onnx path</span></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="co"># os.environ['PIPER_LENGTH_SCALE'] = '1.5'             # speaking rate: &gt;1 slower, &lt;1 faster</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="co"># os.environ['PIPER_DATA_DIR'] = '/home/kmt/bioinformatics'      # where you downloaded voices to (must match --download-dir above)</span></span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="co"># #os.environ['PIPER_BIN'] = /opt/piper/piper         # if the binary isn't just "piper"</span></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>os.environ[<span class="st">'SNIPPET_CAST_PAUSE'</span>] <span class="op">=</span> <span class="st">'0.6'</span></span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>os.environ[<span class="st">'SNIPPET_CAST_TYPING_SPEED'</span>] <span class="op">=</span> <span class="st">'0.1'</span></span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a>os.environ[<span class="st">'SNIPPET_CAST_OUTPUT_DIR'</span>] <span class="op">=</span> <span class="st">'./videos'</span></span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a><span class="co"># os.environ['SNIPPET_CAST_TTS'] = 'say'</span></span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a>os.environ[<span class="st">'SNIPPET_CAST_TTS'</span>] <span class="op">=</span> <span class="st">'manual'</span></span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a>os.environ[<span class="st">'SNIPPET_CAST_MANUAL_AUDIO_DIR'</span>] <span class="op">=</span> <span class="st">'./manual_audio'</span></span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a><span class="co"># os.environ['SNIPPET_CAST_SUBTITLES'] = '1'</span></span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a><span class="co"># os.environ['SNIPPET_CAST_RECORD'] = '1'</span></span>
+<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a><span class="co">#%%snippet-cast --tts say --pause 0.6 --typing-speed 0.1 --subtitles -o out.mp4 </span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
-<p>pixi add ffmpeg pixi add –pypi piper-tts</p>
-<p>python -m piper.download_voices</p>
-<p>python -m piper.download_voices en_US-lessac-medium python -m piper.download_voices da_DK-talesyntese-medium</p>
-<div id="b8592051" class="cell" data-execution_count="2">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="op">%</span>load_ext snippet_cast.magic</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div id="3ed20d48" class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>snippet<span class="op">-</span>cast <span class="op">-</span>n hello</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"hello world"</span>) <span class="co">#:  "print" prints the string</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"hi kasper"</span>) <span class="co">#: "print" prints the other string</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
-<div id="6928d65a" class="cell" data-execution_count="7">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>snippet<span class="op">-</span>cast <span class="op">--</span>tts piper <span class="op">--</span>pause <span class="fl">0.6</span> <span class="op">--</span>typing<span class="op">-</span>speed <span class="fl">0.1</span> <span class="op">--</span>subtitles <span class="op">-</span>o out.mp4 </span>
-<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="co">#: 1) Lets compute the Fibonacci numbers / Let's trace an iterative Fibonacci function as it runs.</span></span>
-<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> fib(n):             <span class="co">#: 3) Now define the function. / The first line names the fib-function and defines its parameters.</span></span>
-<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    a, b <span class="op">=</span> <span class="dv">0</span>, <span class="dv">1</span>         <span class="co">#: 4) "a" and "b" are our first two Fibonacci numbers / Start from the first two Fibonacci numbers, zero and one.</span></span>
-<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> _ <span class="kw">in</span> <span class="bu">range</span>(n):  <span class="co">#: 5) / Loop n times; the counter itself is unused.</span></span>
-<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>        a, b <span class="op">=</span> b, a <span class="op">+</span> b <span class="co">#: 6) / Advance the pair — b becomes the running sum.</span></span>
-<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> a            <span class="co">#: 7) / After the loop, a holds the nth Fibonacci number.</span></span>
-<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> fib(<span class="dv">7</span>)         <span class="co">#: 2) We call our function "fib" and make it take a single argument / Call fib with seven; result becomes thirteen.</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>14 beats (7 pass-1 + 7 pass-2) -&gt; out.mp4  (backend: piper, trace: on, two-pass)
-  [pass1 1/7] Lets compute the Fibonacci numbers
-  [pass1 2/7] We call our function "fib" and make it take a single argumen
-  [pass1 3/7] Now define the function.
-  [pass1 4/7] "a" and "b" are our first two Fibonacci numbers
-  [pass1 5/7] (silent)
-  [pass1 6/7] (silent)
-  [pass1 7/7] (silent)
-  [pass2 1/7] Let's trace an iterative Fibonacci function as it runs.
-  [pass2 2/7] The first line names the fib-function and defines its parame
-  [pass2 3/7] Start from the first two Fibonacci numbers, zero and one.
-  [pass2 4/7] Loop n times; the counter itself is unused.
-  [pass2 5/7] Advance the pair — b becomes the running sum.
-  [pass2 6/7] After the loop, a holds the nth Fibonacci number.
-  [pass2 7/7] Call fib with seven; result becomes thirteen.
-done.</code></pre>
+<div id="575fbb2b" class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>snippet<span class="op">-</span>cast <span class="op">--</span>tts say <span class="op">--</span>pause <span class="dv">2</span> <span class="op">--</span>typing<span class="op">-</span>speed <span class="dv">2</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"hello world"</span>) <span class="co">#:  "print" prints the string</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"hi kasper"</span>) <span class="co">#: "print" prints the other string</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
-<div class="cell-output cell-output-display">
-<video src="out.mp4" controls="">
-      Your browser does not support the <code>video</code> element.
-    </video>
+<div id="d8f63ea4" class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>snippet<span class="op">-</span>cast <span class="op">--</span>tts say <span class="op">--</span>pause <span class="dv">2</span> <span class="op">--</span>typing<span class="op">-</span>speed <span class="dv">2</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"hello world"</span>) <span class="co">#: let's make our first program / "print" prints the string</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"hi kasper"</span>) <span class="co">#: let's do another one / "print" prints the other string</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
+<div id="6928d65a" class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb5"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>snippet<span class="op">-</span>cast <span class="op">--</span>tts manual <span class="op">--</span>record <span class="op">-</span>n forl</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="co">#%%snippet-cast --tts say -n forl</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a><span class="co">#: 1) Lets compute the Fibonacci numbers / Let's trace an iterative Fibonacci function as it runs.</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> fib(n):             <span class="co">#: 3) Now define the function. / The first line names the fib-function and defines its parameters.</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>    a, b <span class="op">=</span> <span class="dv">0</span>, <span class="dv">1</span>         <span class="co">#: 4) "a" and "b" are our first two Fibonacci numbers / Start from the first two Fibonacci numbers, zero and one.</span></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> _ <span class="kw">in</span> <span class="bu">range</span>(n):  <span class="co">#: 5) / Loop n times;`` the counter itself is unused.</span></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>        a, b <span class="op">=</span> b, a <span class="op">+</span> b <span class="co">#: 6) / Advance the pair — b becomes the running sum.</span></span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> a            <span class="co">#: 7) / After the loop, a holds the nth Fibonacci number.</span></span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> fib(<span class="dv">7</span>)         <span class="co">#: 2) We call our function "fib" and make it take a single argument / Call fib with seven; result becomes thirteen.</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
-<div id="fa828882" class="cell" data-execution_count="8">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb5"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> IPython.display <span class="im">import</span> Video</span>
-<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>Video(<span class="st">'out.mp4'</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-display" data-execution_count="8">
-<video src="out.mp4" controls="">
-      Your browser does not support the <code>video</code> element.
-    </video>
+<div id="fa828882" class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb6"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> IPython.display <span class="im">import</span> Video</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>Video(<span class="st">'out.mp4'</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
-</div>
-<div id="0bbfac3b" class="cell" data-execution_count="4">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb6"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>snippet<span class="op">-</span>cast <span class="op">--</span>tts piper <span class="op">--</span>pause <span class="fl">0.6</span> <span class="op">--</span>typing<span class="op">-</span>speed <span class="fl">0.1</span> <span class="op">-</span>o out.mp4 </span>
-<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a><span class="co">#: 0) Let's write a Fibonacci function / Let's trace an function as it runs.</span></span>
-<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> fib(n):             <span class="co">#: 2) / The first line names the fib-function and defines its parameters - in this case a single one named n. The first line ends with a colon and the code that runs when the function is called is what is indented on the lines below. </span></span>
-<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>    a, b <span class="op">=</span> <span class="dv">0</span>, <span class="dv">1</span>         <span class="co">#: 3) / Start from the first two Fibonacci numbers, zero and one.</span></span>
-<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> _ <span class="kw">in</span> <span class="bu">range</span>(n):  <span class="co">#: 4) / Loop n times; the counter itself is unused.</span></span>
-<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a>        a, b <span class="op">=</span> b, a <span class="op">+</span> b <span class="co">#: 5) / Advance the pair — b becomes the running sum.</span></span>
-<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> a            <span class="co">#: 6) / After the loop, a holds the nth Fibonacci number.</span></span>
-<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> fib(<span class="dv">7</span>)         <span class="co">#: 1) / Call fib with seven; result becomes thirteen.</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>note: --typing has no effect in two-pass mode ('/' in a marker) — the writing pass always types the new code in.
-14 beats (7 pass-1 + 7 pass-2) -&gt; out.mp4  (backend: piper, trace: on, two-pass)
-  [pass1 1/7] Let's write a Fibonacci function
-  [pass1 2/7] (silent)
-  [pass1 3/7] (silent)
-  [pass1 4/7] (silent)
-  [pass1 5/7] (silent)
-  [pass1 6/7] (silent)
-  [pass1 7/7] (silent)
-  [pass2 1/7] Let's trace an function as it runs.
-  [pass2 2/7] The first line names the fib-function and defines its parame
-  [pass2 3/7] Start from the first two Fibonacci numbers, zero and one.
-  [pass2 4/7] Loop n times; the counter itself is unused.
-  [pass2 5/7] Advance the pair — b becomes the running sum.
-  [pass2 6/7] After the loop, a holds the nth Fibonacci number.
-  [pass2 7/7] Call fib with seven; result becomes thirteen.
-done.</code></pre>
-</div>
-<div class="cell-output cell-output-display">
-<video src="out.mp4" controls="">
-      Your browser does not support the <code>video</code> element.
-    </video>
-</div>
+<div id="0bbfac3b" class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb7"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>snippet<span class="op">-</span>cast <span class="op">--</span>tts piper <span class="op">--</span>pause <span class="fl">0.6</span> <span class="op">--</span>typing<span class="op">-</span>speed <span class="fl">0.1</span> <span class="op">-</span>o out.mp4 </span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a><span class="co">#: 0) Let's write a Fibonacci function / Let's trace an function as it runs.</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> fib(n):             <span class="co">#: 2) / The first line names the fib-function and defines its parameters - in this case a single one named n. The first line ends with a colon and the code that runs when the function is called is what is indented on the lines below. </span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>    a, b <span class="op">=</span> <span class="dv">0</span>, <span class="dv">1</span>         <span class="co">#: 3) / Start from the first two Fibonacci numbers, zero and one.</span></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> _ <span class="kw">in</span> <span class="bu">range</span>(n):  <span class="co">#: 4) / Loop n times; the counter itself is unused.</span></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>        a, b <span class="op">=</span> b, a <span class="op">+</span> b <span class="co">#: 5) / Advance the pair — b becomes the running sum.</span></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> a            <span class="co">#: 6) / After the loop, a holds the nth Fibonacci number.</span></span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> fib(<span class="dv">7</span>)         <span class="co">#: 1) / Call fib with seven; result becomes thirteen.</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
 <div id="4ad4ac93" class="cell">
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb8"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a></span>

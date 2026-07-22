@@ -198,7 +198,11 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
     <h2 id="toc-title">On this page</h2>
    
   <ul>
-  <li><a href="#learning-moresee-setup.mdfor-configuring-the-piper-and-elevenlabs-text-to-speech-backends." id="toc-learning-moresee-setup.mdfor-configuring-the-piper-and-elevenlabs-text-to-speech-backends." class="nav-link active" data-scroll-target="#learning-moresee-setup.mdfor-configuring-the-piper-and-elevenlabs-text-to-speech-backends.">Learning moreSee SETUP.mdfor configuring the Piper and ElevenLabs text-to-speech backends.</a></li>
+  <li><a href="#installation" id="toc-installation" class="nav-link active" data-scroll-target="#installation">Installation</a></li>
+  <li><a href="#basic-use" id="toc-basic-use" class="nav-link" data-scroll-target="#basic-use">Basic use</a></li>
+  <li><a href="#demo" id="toc-demo" class="nav-link" data-scroll-target="#demo">Demo</a></li>
+  <li><a href="#some-use-case" id="toc-some-use-case" class="nav-link" data-scroll-target="#some-use-case">Some use case</a></li>
+  <li><a href="#learning-more" id="toc-learning-more" class="nav-link" data-scroll-target="#learning-more">Learning more</a></li>
   </ul>
 </nav>
     </div>
@@ -224,12 +228,47 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </header>
 
 
-<p><strong>snippet-cast</strong> turns an annotated Python snippet into a narrated screencastvideo. Narration is written as trailing <code>#:</code> comments on the snippet’s ownlines, so the input stays valid, runnable Python. The tool renderssyntax-highlighted code frames with a progressive reveal, a live variablestate panel, optional burned-in captions and a typing-in animation,synthesises speech per line, and stitches everything into an MP4 with ffmpeg.## Installation::: {.panel-tabset}## pixi<code>bashpixi workspace channel add munch-grouppixi add snippet-cast</code>## conda<code>bashconda install -c munch-group snippet-cast</code>## pip<code>bashpip install snippet-cast</code>:::## Basic use<code>bashsnippet-cast snippet.py -o out.mp4 --tts silent --subtitles</code>## Demo<code>--every</code> animates a loop iteration by iteration instead of revealing thesnippet line by line, rendered here with <code>--tts silent --subtitles</code>:<code>bashsnippet-cast loop.py -o loop_every.mp4 --every --subtitles --tts silent</code></p><div class="quarto-video"><video id="video_shortcode_videojs_video1" class="video-js vjs-default-skin vjs-big-play-centered vjs-fluid" controls="" preload="auto" data-setup="{}" title=""><source src="loop_every.mp4"></video></div>## Some use caseThe <a href="../api/build.html#snippet_cast.screencast.build">build function</a> is the programmaticentry point behind the <code>snippet-cast</code> CLI — call it directly from Python torender a video without shelling out.<p></p>
-<div id="cell-2" class="cell" data-quarto-private-1="{&quot;key&quot;:&quot;execution&quot;,&quot;value&quot;:{&quot;iopub.execute_input&quot;:&quot;2025-12-19T10:49:18.325514Z&quot;,&quot;iopub.status.busy&quot;:&quot;2025-12-19T10:49:18.325385Z&quot;,&quot;iopub.status.idle&quot;:&quot;2025-12-19T10:49:18.328136Z&quot;,&quot;shell.execute_reply&quot;:&quot;2025-12-19T10:49:18.327679Z&quot;}}">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> snippet_cast <span class="im">import</span> build<span class="co"># build("snippet.py", "out.mp4", tts="silent", subtitles=True)</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><strong>snippet-cast</strong> turns an annotated Python snippet into a narrated screencast video. Narration is written as trailing <code>#:</code> comments on the snippet’s own lines, so the input stays valid, runnable Python. The tool renders syntax-highlighted code frames with a progressive reveal, a live variable state panel, optional burned-in captions and a typing-in animation, synthesises speech per line, and stitches everything into an MP4 with ffmpeg.</p>
+<section id="installation" class="level2">
+<h2 class="anchored" data-anchor-id="installation">Installation</h2>
+<div class="tabset-margin-container"></div><div class="panel-tabset">
+<ul class="nav nav-tabs" role="tablist"><li class="nav-item" role="presentation"><a class="nav-link active" id="tabset-1-1-tab" data-bs-toggle="tab" data-bs-target="#tabset-1-1" role="tab" aria-controls="tabset-1-1" aria-selected="true" href="">pixi</a></li><li class="nav-item" role="presentation"><a class="nav-link" id="tabset-1-2-tab" data-bs-toggle="tab" data-bs-target="#tabset-1-2" role="tab" aria-controls="tabset-1-2" aria-selected="false" href="">conda</a></li><li class="nav-item" role="presentation"><a class="nav-link" id="tabset-1-3-tab" data-bs-toggle="tab" data-bs-target="#tabset-1-3" role="tab" aria-controls="tabset-1-3" aria-selected="false" href="">pip</a></li></ul>
+<div class="tab-content">
+<div id="tabset-1-1" class="tab-pane active" role="tabpanel" aria-labelledby="tabset-1-1-tab">
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode bash code-with-copy"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="ex">pixi</span> workspace channel add munch-group</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="ex">pixi</span> add snippet-cast</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
-<section id="learning-moresee-setup.mdfor-configuring-the-piper-and-elevenlabs-text-to-speech-backends." class="level2">
-<h2 class="anchored" data-anchor-id="learning-moresee-setup.mdfor-configuring-the-piper-and-elevenlabs-text-to-speech-backends.">Learning moreSee <a href="https://github.com/munch-group/snippet-cast/blob/main/SETUP.md">SETUP.md</a>for configuring the Piper and ElevenLabs text-to-speech backends.</h2>
+<div id="tabset-1-2" class="tab-pane" role="tabpanel" aria-labelledby="tabset-1-2-tab">
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb2"><pre class="sourceCode bash code-with-copy"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="ex">conda</span> install <span class="at">-c</span> munch-group snippet-cast</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<div id="tabset-1-3" class="tab-pane" role="tabpanel" aria-labelledby="tabset-1-3-tab">
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode bash code-with-copy"><code class="sourceCode bash"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="ex">pip</span> install snippet-cast</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+</div>
+</div>
+</section>
+<section id="basic-use" class="level2">
+<h2 class="anchored" data-anchor-id="basic-use">Basic use</h2>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode bash code-with-copy"><code class="sourceCode bash"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="ex">snippet-cast</span> snippet.py <span class="at">-o</span> out.mp4 <span class="at">--tts</span> silent <span class="at">--subtitles</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</section>
+<section id="demo" class="level2">
+<h2 class="anchored" data-anchor-id="demo">Demo</h2>
+<p><code>--every</code> animates a loop iteration by iteration instead of revealing the snippet line by line, rendered here with <code>--tts silent --subtitles</code>:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb5"><pre class="sourceCode bash code-with-copy"><code class="sourceCode bash"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="ex">snippet-cast</span> loop.py <span class="at">-o</span> loop_every.mp4 <span class="at">--every</span> <span class="at">--subtitles</span> <span class="at">--tts</span> silent</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="quarto-video"><video id="video_shortcode_videojs_video1" class="video-js vjs-default-skin vjs-big-play-centered vjs-fluid" controls="" preload="auto" data-setup="{}" title=""><source src="loop_every.mp4"></video></div>
+</section>
+<section id="some-use-case" class="level2">
+<h2 class="anchored" data-anchor-id="some-use-case">Some use case</h2>
+<p>The <a href="../api/build.html#snippet_cast.screencast.build">build function</a> is the programmatic entry point behind the <code>snippet-cast</code> CLI — call it directly from Python to render a video without shelling out.</p>
+<div id="cell-3" class="cell" data-quarto-private-1="{&quot;key&quot;:&quot;execution&quot;,&quot;value&quot;:{&quot;iopub.execute_input&quot;:&quot;2025-12-19T10:49:18.325514Z&quot;,&quot;iopub.status.busy&quot;:&quot;2025-12-19T10:49:18.325385Z&quot;,&quot;iopub.status.idle&quot;:&quot;2025-12-19T10:49:18.328136Z&quot;,&quot;shell.execute_reply&quot;:&quot;2025-12-19T10:49:18.327679Z&quot;}}">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb6"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> snippet_cast <span class="im">import</span> build</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a><span class="co"># build("snippet.py", "out.mp4", tts="silent", subtitles=True)</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+</section>
+<section id="learning-more" class="level2">
+<h2 class="anchored" data-anchor-id="learning-more">Learning more</h2>
+<p>See <a href="https://github.com/munch-group/snippet-cast/blob/main/SETUP.md">SETUP.md</a> for configuring the Piper and ElevenLabs text-to-speech backends.</p>
 
 
 </section>
