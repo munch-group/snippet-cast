@@ -1,63 +1,10 @@
 [
   {
-    "objectID": "pages/overview.html",
-    "href": "pages/overview.html",
-    "title": "Overview",
+    "objectID": "pages/snippet-cast.html",
+    "href": "pages/snippet-cast.html",
+    "title": "snippet-cast",
     "section": "",
-    "text": "snippet-cast turns an annotated Python snippet into a narrated screencast video. Narration is written as trailing #: comments on the snippet’s own lines, so the input stays valid, runnable Python. The tool renders syntax-highlighted code frames with a progressive reveal, a live variable state panel, optional burned-in captions and a typing-in animation, synthesises speech per line, and stitches everything into an MP4 with ffmpeg.",
-    "crumbs": [
-      "Overview"
-    ]
-  },
-  {
-    "objectID": "pages/overview.html#installation",
-    "href": "pages/overview.html#installation",
-    "title": "Overview",
-    "section": "Installation",
-    "text": "Installation\n\npixicondapip\n\n\npixi workspace channel add munch-group\npixi add snippet-cast\n\n\nconda install -c munch-group snippet-cast\n\n\npip install snippet-cast",
-    "crumbs": [
-      "Overview"
-    ]
-  },
-  {
-    "objectID": "pages/overview.html#basic-use",
-    "href": "pages/overview.html#basic-use",
-    "title": "Overview",
-    "section": "Basic use",
-    "text": "Basic use\nsnippet-cast snippet.py -o out.mp4 --tts silent --subtitles",
-    "crumbs": [
-      "Overview"
-    ]
-  },
-  {
-    "objectID": "pages/overview.html#demo",
-    "href": "pages/overview.html#demo",
-    "title": "Overview",
-    "section": "Demo",
-    "text": "Demo\n--every animates a loop iteration by iteration instead of revealing the snippet line by line, rendered here with --tts silent --subtitles:\nsnippet-cast loop.py -o loop_every.mp4 --every --subtitles --tts silent",
-    "crumbs": [
-      "Overview"
-    ]
-  },
-  {
-    "objectID": "pages/overview.html#some-use-case",
-    "href": "pages/overview.html#some-use-case",
-    "title": "Overview",
-    "section": "Some use case",
-    "text": "Some use case\nThe build function is the programmatic entry point behind the snippet-cast CLI — call it directly from Python to render a video without shelling out.\n\nfrom snippet_cast import build\n\n# build(\"snippet.py\", \"out.mp4\", tts=\"silent\", subtitles=True)",
-    "crumbs": [
-      "Overview"
-    ]
-  },
-  {
-    "objectID": "pages/overview.html#learning-more",
-    "href": "pages/overview.html#learning-more",
-    "title": "Overview",
-    "section": "Learning more",
-    "text": "Learning more\nSee SETUP.md for configuring the Piper and ElevenLabs text-to-speech backends.",
-    "crumbs": [
-      "Overview"
-    ]
+    "text": "import os\n\nimport snippet_cast.magic\n\n# os.environ['PIPER_MODEL'] = './en_US-lessac-medium.onnx'   # … or a local .onnx path\n# os.environ['PIPER_LENGTH_SCALE'] = '1.5'             # speaking rate: &gt;1 slower, &lt;1 faster\n# os.environ['PIPER_DATA_DIR'] = '/home/kmt/bioinformatics'      # where you downloaded voices to (must match --download-dir above)\n# #os.environ['PIPER_BIN'] = /opt/piper/piper         # if the binary isn't just \"piper\"\n\n\nos.environ['SNIPPET_CAST_PAUSE'] = '0.6'\nos.environ['SNIPPET_CAST_TYPING_SPEED'] = '0.1'\nos.environ['SNIPPET_CAST_OUTPUT_DIR'] = './videos'\n\nos.environ['SNIPPET_CAST_TTS'] = 'say'\nos.environ['SNIPPET_CAST_RECORD'] = '0'\n# os.environ['SNIPPET_CAST_TTS'] = 'manual'\n# os.environ['SNIPPET_CAST_MANUAL_AUDIO_DIR'] = './manual_audio'\n# os.environ['SNIPPET_CAST_RECORD'] = '1'\n\n# os.environ['SNIPPET_CAST_SUBTITLES'] = '1'\n\n\n#%%snippet-cast --tts say --pause 0.6 --typing-speed 0.1 --subtitles -o out.mp4 \n\n\n%%snippet-cast -n hello --tts say\nprint(\"hello world\") #:  \"print\" prints the string\nprint(\"hi kasper\") #: \"print\" prints the other string\n\nhello world\nhi kasper\n2 beats -&gt; ./videos/hello.mp4  (backend: say, trace: on, first-exec)\n  [1/2] \"print\" prints the string\n  [2/2] \"print\" prints the other string\ndone.\n\n\n\n      Your browser does not support the video element.\n    \n\n\n\n%%snippet-cast --tts say --pause 2 --typing-speed 2\nprint(\"hello world\") #:  \"print\" prints the string\nprint(\"hi kasper\") #: \"print\" prints the other string\n\n\n%%snippet-cast --tts say --pause 2 --typing-speed 2\nprint(\"hello world\") #: let's make our first program / \"print\" prints the string\nprint(\"hi kasper\") #: let's do another one / \"print\" prints the other string\n\n\n%%snippet-cast --tts manual --record -n forl\n#%%snippet-cast --tts say -n forl\n#: 1) Lets compute the Fibonacci numbers / Let's trace an iterative Fibonacci function as it runs.\ndef fib(n):             #: 3) Now define the function. / The first line names the fib-function and defines its parameters.\n    a, b = 0, 1         #: 4) \"a\" and \"b\" are our first two Fibonacci numbers / Start from the first two Fibonacci numbers, zero and one.\n    for _ in range(n):  #: 5) / Loop n times;`` the counter itself is unused.\n        a, b = b, a + b #: 6) / Advance the pair — b becomes the running sum.\n    return a            #: 7) / After the loop, a holds the nth Fibonacci number.\n\nresult = fib(7)         #: 2) We call our function \"fib\" and make it take a single argument / Call fib with seven; result becomes thirteen.\n\n\nfrom IPython.display import Video\nVideo('out.mp4')\n\n\n%%snippet-cast --tts piper --pause 0.6 --typing-speed 0.1 -o out.mp4 \n\n#: 0) Let's write a Fibonacci function / Let's trace an function as it runs.\ndef fib(n):             #: 2) / The first line names the fib-function and defines its parameters - in this case a single one named n. The first line ends with a colon and the code that runs when the function is called is what is indented on the lines below. \n    a, b = 0, 1         #: 3) / Start from the first two Fibonacci numbers, zero and one.\n    for _ in range(n):  #: 4) / Loop n times; the counter itself is unused.\n        a, b = b, a + b #: 5) / Advance the pair — b becomes the running sum.\n    return a            #: 6) / After the loop, a holds the nth Fibonacci number.\nresult = fib(7)         #: 1) / Call fib with seven; result becomes thirteen.\n\n\n\nsnippet-cast tmp.py -o out.mp4 --typing --tts piper --piper-model ~/piper-voices/en_US-lessac-medium.onnx --piper-length-scale 1.5 --piper-data-dir ~/piper-voices --pause 0.6 --typing-speed 0.1 --every"
   },
   {
     "objectID": "api/index.html",
@@ -124,10 +71,63 @@
     ]
   },
   {
-    "objectID": "pages/snippet-cast.html",
-    "href": "pages/snippet-cast.html",
-    "title": "snippet-cast",
+    "objectID": "pages/overview.html",
+    "href": "pages/overview.html",
+    "title": "Overview",
     "section": "",
-    "text": "import os\n\nimport snippet_cast.magic\n\n# os.environ['PIPER_MODEL'] = './en_US-lessac-medium.onnx'   # … or a local .onnx path\n# os.environ['PIPER_LENGTH_SCALE'] = '1.5'             # speaking rate: &gt;1 slower, &lt;1 faster\n# os.environ['PIPER_DATA_DIR'] = '/home/kmt/bioinformatics'      # where you downloaded voices to (must match --download-dir above)\n# #os.environ['PIPER_BIN'] = /opt/piper/piper         # if the binary isn't just \"piper\"\n\n\nos.environ['SNIPPET_CAST_PAUSE'] = '0.6'\nos.environ['SNIPPET_CAST_TYPING_SPEED'] = '0.1'\nos.environ['SNIPPET_CAST_OUTPUT_DIR'] = './videos'\n\nos.environ['SNIPPET_CAST_TTS'] = 'say'\nos.environ['SNIPPET_CAST_RECORD'] = '0'\n# os.environ['SNIPPET_CAST_TTS'] = 'manual'\n# os.environ['SNIPPET_CAST_MANUAL_AUDIO_DIR'] = './manual_audio'\n# os.environ['SNIPPET_CAST_RECORD'] = '1'\n\n# os.environ['SNIPPET_CAST_SUBTITLES'] = '1'\n\n\n#%%snippet-cast --tts say --pause 0.6 --typing-speed 0.1 --subtitles -o out.mp4 \n\n\n%%snippet-cast -n hello --tts say\nprint(\"hello world\") #:  \"print\" prints the string\nprint(\"hi kasper\") #: \"print\" prints the other string\n\nhello world\nhi kasper\n2 beats -&gt; ./videos/hello.mp4  (backend: say, trace: on, first-exec)\n  [1/2] \"print\" prints the string\n  [2/2] \"print\" prints the other string\ndone.\n\n\n\n      Your browser does not support the video element.\n    \n\n\n\n%%snippet-cast --tts say --pause 2 --typing-speed 2\nprint(\"hello world\") #:  \"print\" prints the string\nprint(\"hi kasper\") #: \"print\" prints the other string\n\n\n%%snippet-cast --tts say --pause 2 --typing-speed 2\nprint(\"hello world\") #: let's make our first program / \"print\" prints the string\nprint(\"hi kasper\") #: let's do another one / \"print\" prints the other string\n\n\n%%snippet-cast --tts manual --record -n forl\n#%%snippet-cast --tts say -n forl\n#: 1) Lets compute the Fibonacci numbers / Let's trace an iterative Fibonacci function as it runs.\ndef fib(n):             #: 3) Now define the function. / The first line names the fib-function and defines its parameters.\n    a, b = 0, 1         #: 4) \"a\" and \"b\" are our first two Fibonacci numbers / Start from the first two Fibonacci numbers, zero and one.\n    for _ in range(n):  #: 5) / Loop n times;`` the counter itself is unused.\n        a, b = b, a + b #: 6) / Advance the pair — b becomes the running sum.\n    return a            #: 7) / After the loop, a holds the nth Fibonacci number.\n\nresult = fib(7)         #: 2) We call our function \"fib\" and make it take a single argument / Call fib with seven; result becomes thirteen.\n\n\nfrom IPython.display import Video\nVideo('out.mp4')\n\n\n%%snippet-cast --tts piper --pause 0.6 --typing-speed 0.1 -o out.mp4 \n\n#: 0) Let's write a Fibonacci function / Let's trace an function as it runs.\ndef fib(n):             #: 2) / The first line names the fib-function and defines its parameters - in this case a single one named n. The first line ends with a colon and the code that runs when the function is called is what is indented on the lines below. \n    a, b = 0, 1         #: 3) / Start from the first two Fibonacci numbers, zero and one.\n    for _ in range(n):  #: 4) / Loop n times; the counter itself is unused.\n        a, b = b, a + b #: 5) / Advance the pair — b becomes the running sum.\n    return a            #: 6) / After the loop, a holds the nth Fibonacci number.\nresult = fib(7)         #: 1) / Call fib with seven; result becomes thirteen.\n\n\n\nsnippet-cast tmp.py -o out.mp4 --typing --tts piper --piper-model ~/piper-voices/en_US-lessac-medium.onnx --piper-length-scale 1.5 --piper-data-dir ~/piper-voices --pause 0.6 --typing-speed 0.1 --every"
+    "text": "snippet-cast turns an annotated Python snippet into a narrated screencast video. Narration is written as trailing #: comments on the snippet’s own lines, so the input stays valid, runnable Python. The tool renders syntax-highlighted code frames with a progressive reveal, a live variable state panel, optional burned-in captions and a typing-in animation, synthesises speech per line, and stitches everything into an MP4 with ffmpeg.",
+    "crumbs": [
+      "Overview"
+    ]
+  },
+  {
+    "objectID": "pages/overview.html#installation",
+    "href": "pages/overview.html#installation",
+    "title": "Overview",
+    "section": "Installation",
+    "text": "Installation\n\npixicondapip\n\n\npixi workspace channel add munch-group\npixi add snippet-cast\n\n\nconda install -c munch-group snippet-cast\n\n\npip install snippet-cast",
+    "crumbs": [
+      "Overview"
+    ]
+  },
+  {
+    "objectID": "pages/overview.html#basic-use",
+    "href": "pages/overview.html#basic-use",
+    "title": "Overview",
+    "section": "Basic use",
+    "text": "Basic use\nsnippet-cast snippet.py -o out.mp4 --tts silent --subtitles",
+    "crumbs": [
+      "Overview"
+    ]
+  },
+  {
+    "objectID": "pages/overview.html#demo",
+    "href": "pages/overview.html#demo",
+    "title": "Overview",
+    "section": "Demo",
+    "text": "Demo\n--every animates a loop iteration by iteration instead of revealing the snippet line by line, rendered here with --tts silent --subtitles:\nsnippet-cast loop.py -o loop_every.mp4 --every --subtitles --tts silent",
+    "crumbs": [
+      "Overview"
+    ]
+  },
+  {
+    "objectID": "pages/overview.html#some-use-case",
+    "href": "pages/overview.html#some-use-case",
+    "title": "Overview",
+    "section": "Some use case",
+    "text": "Some use case\nThe build function is the programmatic entry point behind the snippet-cast CLI — call it directly from Python to render a video without shelling out.\n\nfrom snippet_cast import build\n\n# build(\"snippet.py\", \"out.mp4\", tts=\"silent\", subtitles=True)",
+    "crumbs": [
+      "Overview"
+    ]
+  },
+  {
+    "objectID": "pages/overview.html#learning-more",
+    "href": "pages/overview.html#learning-more",
+    "title": "Overview",
+    "section": "Learning more",
+    "text": "Learning more\nSee SETUP.md for configuring the Piper and ElevenLabs text-to-speech backends.",
+    "crumbs": [
+      "Overview"
+    ]
   }
 ]
