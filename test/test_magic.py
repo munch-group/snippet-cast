@@ -1,8 +1,10 @@
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
 
+import snippet_cast
 import snippet_cast.magic as sc_magic
 from snippet_cast.screencast import FONT_NAME, FONT_SIZE, _mono_font_path
 
@@ -45,6 +47,27 @@ def ip():
     return shell
 
 
+def test_import_snippet_cast_registers_magic_in_live_kernel(ip):
+    """Regression test: a plain `import snippet_cast` (not `import
+    snippet_cast.magic`) must also auto-register %%snippet-cast when a live
+    kernel and IPython are both present — see
+    _register_magic_if_in_notebook() in snippet_cast/__init__.py."""
+    ip.magics_manager.magics["cell"].pop("snippet-cast", None)
+    assert "snippet-cast" not in ip.magics_manager.magics["cell"]
+
+    snippet_cast._register_magic_if_in_notebook()
+
+    assert "snippet-cast" in ip.magics_manager.magics["cell"]
+
+
+def test_register_magic_is_noop_without_ipython_installed(monkeypatch):
+    """The hook must bail out before ever importing snippet_cast.magic when
+    IPython itself isn't installed — that's what keeps a plain `import
+    snippet_cast` IPython-free outside a notebook."""
+    monkeypatch.setitem(sys.modules, "IPython", None)
+    snippet_cast._register_magic_if_in_notebook()  # must not raise
+
+
 def test_cell_magic_renders_and_displays_video(ip, tmp_path):
     out = tmp_path / "out.mp4"
     cell = FIB.read_text()
@@ -84,12 +107,30 @@ def test_cell_magic_reports_clean_error_on_empty_cell(ip, capsys):
     assert "No narration found" in capsys.readouterr().err
 
 
-def test_cell_magic_record_requires_manual_audio_dir(ip, capsys):
+def test_cell_magic_record_rejects_conflicting_tts(ip, capsys):
     cell = FIB.read_text()
-    result = ip.run_cell(f"%%snippet-cast --record\n{cell}")
+    result = ip.run_cell(f"%%snippet-cast --record --tts say\n{cell}")
+
+    assert result.success  # the magic itself must not raise/crash the cell
+    assert "--record always uses the manual backend" in capsys.readouterr().err
+
+
+def test_cell_magic_record_defaults_manual_audio_dir(ip, tmp_path, monkeypatch):
+    out = tmp_path / "out.mp4"
+    calls = []
+
+    def fake_record_narration(source_path, manual_audio_dir, out_path, **kw):
+        calls.append(manual_audio_dir)
+        Path(out_path).write_bytes(b"fake-mp4")
+        return True
+
+    monkeypatch.setattr(sc_magic, "record_narration", fake_record_narration)
+
+    cell = FIB.read_text()
+    result = ip.run_cell(f"%%snippet-cast -o {out} --record --no-frame\n{cell}")
 
     assert result.success
-    assert "--record requires --manual-audio-dir" in capsys.readouterr().err
+    assert calls == [sc_magic.MANUAL_AUDIO_DIR_DEFAULT]
 
 
 def test_cell_magic_record_calls_record_narration_and_displays_video(ip, tmp_path, monkeypatch):

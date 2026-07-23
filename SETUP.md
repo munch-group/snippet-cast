@@ -13,6 +13,13 @@ every iteration; a line with `{i}` differs each time and is synthesised (and, on
 ElevenLabs, billed) each time. So proof your script first with the free
 `--tts silent --subtitles`, then render once with a real voice.
 
+Another thing worth knowing: writing 2 or more consecutive periods in a `#:`
+narration inserts a pause instead of being spoken — 0.1s of silence per period,
+so `".."` is a 0.2s pause and `"...."` is 0.4s, e.g.
+`#: Let's slow down here.. and look closer.` A single period is still just
+normal end-of-sentence punctuation. This works with every backend below
+except `manual` (a human just reads the dots as a pause cue instead).
+
 ---
 
 ## say — macOS built-in, zero setup
@@ -44,6 +51,10 @@ already have, one per unique narration line, in the exact order `build()`
 requests them. Use it for a human voiceover, or to drive `say` (or any other
 tool) by hand, line by line, with full control snippet-cast's other backends
 don't give you.
+
+(If a narration uses "..", "....", etc. for an inline pause — see below — it's
+purely a cue for you to read it that way; the manual backend doesn't splice
+anything, so it still needs exactly one recording per beat.)
 
 ### 1. Export the narration script
 
@@ -94,9 +105,12 @@ line you want to redo — no need to touch the others or re-run snippet-cast.
 snippet-cast fib.py -o out.mp4 --tts manual --manual-audio-dir audio/
 ```
 
-`build()`/the CLI reject `--manual-audio-dir` without `--tts manual`, and
-`--tts manual` without `--manual-audio-dir`. If a numbered file is missing,
-the error names the exact stem and narration text it was expecting, e.g.
+`build()`/the CLI reject `--manual-audio-dir` without `--tts manual` (or
+`--record`). The CLI/notebook default `--manual-audio-dir` to `./manual_audio`
+when it's not given, so `--tts manual` alone won't hit this — but calling
+`build()` directly (from Python) still requires passing `manual_audio_dir`
+explicitly. If a numbered file is missing, the error names the exact stem and
+narration text it was expecting, e.g.
 `manual backend: missing recording 003.* in 'audio/' (narration: '...'). Run
 --export-script for the numbered list this needs to match.` — re-running
 `--export-script` after any edit to the snippet's `#:` narration is the fix,
@@ -105,7 +119,8 @@ since renumbering follows straight from the source.
 ### Recording live via the microphone (`--record`, macOS)
 
 Steps 1–3 above, done interactively, with your own voice, straight into the
-terminal or a notebook cell — no separate script export, no external editor:
+terminal or a notebook cell — no separate script export, no external editor.
+`--manual-audio-dir` defaults to `./manual_audio` if you omit it:
 
 ```bash
 snippet-cast fib.py -o out.mp4 --record --manual-audio-dir audio/
@@ -118,8 +133,9 @@ from snippet_cast import record_narration
 record_narration("fib.py", "audio/", "out.mp4")
 ```
 
-or, in the `%%snippet-cast` cell magic (`--tts` is ignored — `--record` always
-targets the manual backend):
+or, in the `%%snippet-cast` cell magic (`--record` always targets the manual
+backend — leave `--tts` unset, since passing it as anything other than
+`manual` alongside `--record` is now an error):
 
 ```
 %%snippet-cast --record --manual-audio-dir audio/

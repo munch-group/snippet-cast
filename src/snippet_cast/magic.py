@@ -6,10 +6,15 @@ magic automatically:
 
     import snippet_cast.magic
 
-`%load_ext snippet_cast.magic` still works too (and is the only option
-outside a live kernel, or to force re-registration after editing this file
-under autoreload). `import snippet_cast` alone does *not* pull this module
-in — that import is kept IPython-free on purpose.
+A plain `import snippet_cast` does this for you too, as long as IPython is
+already installed and a live kernel is running: `snippet_cast/__init__.py`
+runs the identical `get_ipython()`-gated check and only then imports this
+module. Outside a live kernel, or without IPython installed, that same check
+bails out before ever importing this module — so `import snippet_cast` in a
+plain script, or in an environment without the `jupyter` extra, still never
+requires IPython. `%load_ext snippet_cast.magic` still works too, and is the
+only option outside a live kernel, or to force re-registration after editing
+this file under autoreload.
 
 Then write an annotated snippet directly in a cell and render + display it
 inline, instead of saving it to a separate .py file first:
@@ -54,6 +59,8 @@ from IPython.display import HTML, Image, Video, clear_output, display
 
 from .screencast import (
     BACKENDS,
+    MANUAL_AUDIO_DIR_DEFAULT,
+    PAUSE_DEFAULT,
     TYPE_SPEED,
     build,
     export_script,
@@ -158,7 +165,9 @@ class SnippetCastMagics(Magics):
     @argument("--tts", choices=list(BACKENDS), default=None,
               help="TTS backend [default: silent here — always works, no "
                    "setup; see SETUP.md for piper/elevenlabs; "
-                   "env: SNIPPET_CAST_TTS]")
+                   "env: SNIPPET_CAST_TTS] (--record implies manual; passing "
+                   "--tts explicitly as anything else together with --record "
+                   "is an error)")
     @argument("--no-trace", action="store_true", default=None,
               help="don't execute the snippet; skip the state panel "
                    "[env: SNIPPET_CAST_NO_TRACE]")
@@ -176,17 +185,18 @@ class SnippetCastMagics(Magics):
                    f"[default: {TYPE_SPEED}; env: SNIPPET_CAST_TYPING_SPEED]")
     @argument("--pause", type=float, default=None, metavar="SECONDS",
               help="seconds of silence held on each beat's frame after its "
-                   "narration [default: 0; env: SNIPPET_CAST_PAUSE]")
+                   f"narration [default: {PAUSE_DEFAULT}; env: SNIPPET_CAST_PAUSE]")
     @argument("--manual-audio-dir", default=None, metavar="DIR",
               help="directory of pre-recorded audio for --tts manual "
-                   "[env: SNIPPET_CAST_MANUAL_AUDIO_DIR]")
+                   f"[default: {MANUAL_AUDIO_DIR_DEFAULT}; "
+                   "env: SNIPPET_CAST_MANUAL_AUDIO_DIR]")
     @argument("--export-script", action=argparse.BooleanOptionalAction, default=None,
               help="print the ordered narration script instead of rendering "
                    "[env: SNIPPET_CAST_EXPORT_SCRIPT]")
     @argument("--record", action=argparse.BooleanOptionalAction, default=None,
               help="interactively record narration via the system microphone "
-                   "(macOS only), then build with --tts manual — requires "
-                   "--manual-audio-dir DIR; see SETUP.md "
+                   "(macOS only), then build with --tts manual (implied "
+                   "automatically); see SETUP.md "
                    "[env: SNIPPET_CAST_RECORD]")
     @argument("--no-frame", action="store_true", default=None,
               help="with --record, don't pop each beat's rendered frame in "
@@ -198,14 +208,33 @@ class SnippetCastMagics(Magics):
         """Render `cell` (an annotated Python snippet) into a screencast and
         display it inline. See the module docstring for a full example."""
         args = parse_argstring(self.snippet_cast, line)
+        # Captured before resolve_env_defaults fills in the "silent"/
+        # manual_audio_dir fallbacks below, so --record can tell an explicit
+        # --tts/env var apart from the hardcoded default it's about to
+        # silently override.
+        tts_explicit = args.tts is not None or os.environ.get("SNIPPET_CAST_TTS") is not None
+        manual_dir_explicit = (args.manual_audio_dir is not None
+                               or os.environ.get("SNIPPET_CAST_MANUAL_AUDIO_DIR") is not None)
         resolve_env_defaults(
             args, tts="silent", no_trace=False, every=False, subtitles=False,
-            typing=False, typing_speed=TYPE_SPEED, pause=0.0, export_script=False,
-            manual_audio_dir=None, record=False, no_frame=False,
+            typing=False, typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT, export_script=False,
+            manual_audio_dir=MANUAL_AUDIO_DIR_DEFAULT, record=False, no_frame=False,
             name="out", output_dir=".")
         if args.tts not in BACKENDS:
             print(f"snippet-cast: --tts: invalid choice {args.tts!r} "
                   f"(choose from {', '.join(BACKENDS)})", file=sys.stderr)
+            return
+
+        if args.record:
+            if tts_explicit and args.tts != "manual":
+                print(f"snippet-cast: --record always uses the manual backend; "
+                      f"got --tts {args.tts!r}. Drop --tts (or set it to manual) "
+                      "when using --record.", file=sys.stderr)
+                return
+            args.tts = "manual"
+        elif manual_dir_explicit and args.tts != "manual":
+            print("snippet-cast: --manual-audio-dir only applies with --tts "
+                  "manual (or --record).", file=sys.stderr)
             return
 
         fd, tmp_path = tempfile.mkstemp(suffix=".py", prefix="snippet_cast_cell_")
@@ -225,10 +254,6 @@ class SnippetCastMagics(Magics):
             out_path = resolve_output_path(args.output, args.output_dir, args.name)
 
             if args.record:
-                if not args.manual_audio_dir:
-                    print("snippet-cast: --record requires --manual-audio-dir DIR.",
-                          file=sys.stderr)
-                    return
                 view = _LiveRecordView()
                 try:
                     with contextlib.redirect_stdout(view):

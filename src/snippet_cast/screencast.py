@@ -183,11 +183,15 @@ COL_CAPTION = "#e8e8e8"       # caption text on a dark STYLE background
 COL_RULE = "#3a3b36"          # rule above the caption band on a dark STYLE background
 COL_CAPTION_LIGHT = "#2b2b2b" # caption text on a light STYLE background
 COL_RULE_LIGHT = "#d0d0d0"    # rule above the caption band on a light STYLE background
-TYPE_SPEED = 0.035      # default seconds to reveal each new character in --typing mode
+TYPE_SPEED = 0.15       # default seconds to reveal each new character in --typing mode
 TYPE_MAXFRAMES = 150    # absolute cap on typing frames per beat, so a slow speed
                         # or a very long line can't blow a beat up unboundedly
 TWO_PASS_SEP = "/"      # splits a #: narration into "writing pass / walkthrough pass"
 PART2_EMPTY_HOLD = 0.8  # seconds to hold a walkthrough-pass beat with no narration
+PAUSE_DEFAULT = 0.8     # default seconds of silence held on each beat after its narration
+MANUAL_AUDIO_DIR_DEFAULT = "./manual_audio"  # default --manual-audio-dir for CLI/notebook
+PAUSE_MARKER_RE = re.compile(r"(\.{2,})")  # 2+ consecutive periods in narration = an inline pause
+PAUSE_PER_PERIOD = 0.1  # seconds of silence per "." in a PAUSE_MARKER_RE run (".."->0.2s, "...."->0.4s)
 AUDIO_AR = "44100"      # normalise all clips so concat -c copy is safe
 AUDIO_AC = "2"
 MANUAL_AUDIO_EXTS = (".wav", ".mp3", ".m4a", ".aiff", ".flac", ".ogg")  # --tts manual / --record
@@ -1109,19 +1113,85 @@ def concat(clips, out, workdir):
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def _cached_synth(synth, audio_cache, text, work, tag):
+def _make_silence(duration, work, tag):
+    """A silent audio file `duration` seconds long, normalised to
+    AUDIO_AR/AUDIO_AC like everything else in this pipeline."""
+    path = os.path.join(work, f"seg_{tag}.wav")
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r={AUDIO_AR}:cl=stereo",
+         "-t", f"{duration:.3f}", path],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return path
+
+
+def _concat_audio_pieces(pieces, work, tag):
+    """Stitch audio files into one, via ffmpeg's `concat` audio filter —
+    unlike the `concat` demuxer's `-c copy` (used by concat() for whole
+    clips), the filter decodes each input first, so pieces coming from
+    different backends/containers (or a generated .wav silence) don't need
+    matching codecs or sample rates going in."""
+    if len(pieces) == 1:
+        return pieces[0]
+    path = os.path.join(work, f"seg_{tag}.wav")
+    inputs = [x for p in pieces for x in ("-i", p)]
+    graph = "".join(f"[{i}:a]" for i in range(len(pieces))) + \
+        f"concat=n={len(pieces)}:v=0:a=1[outa]"
+    subprocess.run(
+        ["ffmpeg", "-y", *inputs, "-filter_complex", graph, "-map", "[outa]",
+         "-ar", AUDIO_AR, "-ac", AUDIO_AC, path],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return path
+
+
+def _synth_with_pauses(synth, text, work, tag):
+    """Call `synth` on `text`, honoring inline pauses: a run of 2+
+    consecutive periods (PAUSE_MARKER_RE — "..", "....", ...) is not spoken.
+    It's replaced by PAUSE_PER_PERIOD seconds of silence per period (".."
+    -> 0.2s, "...." -> 0.4s), with the text on either side synthesized as
+    separate clips and stitched back into one audio file. A single period is
+    ordinary end-of-sentence punctuation and is left untouched — this only
+    ever fires on a run of 2 or more. Falls back to one plain, unmodified
+    `synth()` call — exactly as if this feature didn't exist — when `text`
+    has no such run, so a narration that never uses it renders exactly as
+    before."""
+    parts = PAUSE_MARKER_RE.split(text)
+    if len(parts) == 1:
+        return synth(text, os.path.join(work, f"seg_{tag}"))
+
+    pieces = []
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            part = part.strip()
+            if part:
+                pieces.append(synth(part, os.path.join(work, f"seg_{tag}_{i}")))
+        else:
+            pieces.append(_make_silence(len(part) * PAUSE_PER_PERIOD, work, f"{tag}_{i}"))
+    return _concat_audio_pieces(pieces, work, f"{tag}_joined")
+
+
+def _cached_synth(synth, audio_cache, text, work, tag, split_pauses=True):
     """audio_cache-deduped synth call: identical narration text (e.g. an
     un-interpolated loop line, or the same line reused across passes) is
     synthesized once and reused. Same semantics as the legacy loop's inline
     cache check, factored out because two-pass rendering needs it at
-    multiple call sites."""
+    multiple call sites.
+
+    `split_pauses=False` skips _synth_with_pauses() and calls `synth` exactly
+    once regardless of any '..' pause markers in `text` — used for the
+    manual backend only, where splitting would consume more than one
+    numbered recording per beat and desync --tts manual's file order with
+    --export-script's (a human reads the dots as a natural pause cue when
+    recording; nothing needs to be spliced)."""
     if text not in audio_cache:
-        audio_cache[text] = synth(text, os.path.join(work, f"seg_{tag}"))
+        if split_pauses:
+            audio_cache[text] = _synth_with_pauses(synth, text, work, tag)
+        else:
+            audio_cache[text] = synth(text, os.path.join(work, f"seg_{tag}"))
     return audio_cache[text]
 
 
 def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
-                     typing_speed, pause):
+                     typing_speed, pause, split_pauses):
     """Render two-pass mode's clips and return the ordered clip-path list
     (all of pass 1, then all of pass 2) ready for concat()."""
     clips = []
@@ -1134,7 +1204,8 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
 
         if len(stream) >= 2 and stream.strip():
             if beat.narration:
-                audio = _cached_synth(synth, audio_cache, beat.narration, work, f"p1a_{k:03d}")
+                audio = _cached_synth(synth, audio_cache, beat.narration, work,
+                                      f"p1a_{k:03d}", split_pauses)
                 duration = probe_duration(audio)
             else:
                 audio, duration = None, len(stream) * typing_speed
@@ -1148,7 +1219,8 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
         elif beat.narration:
             hold = compose(cv, _visible_code(code_lines, beat.revealed), [], {},
                            caption, os.path.join(work, f"p1_hold_{k:03d}.png"))
-            audio = _cached_synth(synth, audio_cache, beat.narration, work, f"p1b_{k:03d}")
+            audio = _cached_synth(synth, audio_cache, beat.narration, work,
+                                  f"p1b_{k:03d}", split_pauses)
             clip = os.path.join(work, f"p1_clip_{k:03d}.mp4")
             make_clip(hold, audio, clip)
             clips.append(clip)
@@ -1180,7 +1252,8 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
                        beat.state, caption, os.path.join(work, f"p2_hold_{k:03d}.png"))
         clip = os.path.join(work, f"p2_clip_{k:03d}.mp4")
         if beat.narration:
-            audio = _cached_synth(synth, audio_cache, beat.narration, work, f"p2_{k:03d}")
+            audio = _cached_synth(synth, audio_cache, beat.narration, work,
+                                  f"p2_{k:03d}", split_pauses)
             make_clip(hold, audio, clip)
         else:
             make_pause_clip(hold, PART2_EMPTY_HOLD, clip)
@@ -1229,7 +1302,7 @@ def _build_all_beats(source_path, trace, every):
 
 
 def build(source_path, out_path, tts, trace=True, every=False,
-          subtitles=False, typing=False, typing_speed=TYPE_SPEED, pause=0.0,
+          subtitles=False, typing=False, typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT,
           manual_audio_dir=None):
     """
     Render an annotated Python snippet into a narrated screencast video.
@@ -1266,9 +1339,9 @@ def build(source_path, out_path, tts, trace=True, every=False,
         [default: `TYPE_SPEED`]. Larger is slower.
     pause :
         Seconds of silence to hold on each beat's frame after its narration
-        finishes, before the next beat begins. `0` (default) cuts directly
-        from one beat's narration to the next. In two-pass mode this only
-        applies to the walkthrough pass.
+        finishes, before the next beat begins [default: `PAUSE_DEFAULT`]. `0`
+        cuts directly from one beat's narration to the next. In two-pass mode
+        this only applies to the walkthrough pass.
     manual_audio_dir :
         Directory of pre-recorded audio files for `tts="manual"`, named
         001.wav, 002.wav, ... (or .mp3/.m4a/.aiff/.flac/.ogg) matching
@@ -1283,6 +1356,18 @@ def build(source_path, out_path, tts, trace=True, every=False,
     panel, no highlight), then the existing walkthrough plays again from the
     top (narrated by the text after `/`, exactly today's single-pass
     mechanics). A file with no `/` anywhere renders exactly as before.
+
+    Inline pauses within a narration line
+    --------------------------------------
+    A run of 2+ consecutive periods inside a `#:` narration (".." , "....",
+    ...) inserts a pause mid-line instead of being spoken: `PAUSE_PER_PERIOD`
+    seconds of silence per period (".." -> 0.2s, "...." -> 0.4s), with the
+    text on either side synthesized separately and stitched together (see
+    `_synth_with_pauses`). A single period is ordinary end-of-sentence
+    punctuation and is untouched. Applies to every real speech backend; the
+    manual backend ignores it (a human recording narration reads the dots as
+    a natural pause cue, and splitting would desync `--tts manual`'s file
+    numbering with `export_script()`'s).
 
     Examples
     --------
@@ -1320,6 +1405,10 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
     if two_pass and typing:
         print("note: --typing has no effect in two-pass mode ('/' in a "
               "marker) — the writing pass always types the new code in.")
+    # '..' narration pause markers (see _synth_with_pauses) only apply to real
+    # speech backends — the manual backend must get exactly one synth() call
+    # per beat, or its file numbering desyncs from --export-script's.
+    split_pauses = tts != "manual"
 
     work = tempfile.mkdtemp(prefix="screencast_")
 
@@ -1331,7 +1420,7 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
                          subtitles=subtitles)
         audio_cache = {}
         clips = _render_two_pass(code_lines, beats1, beats2, cv, work, synth,
-                                 audio_cache, typing_speed, pause)
+                                 audio_cache, typing_speed, pause, split_pauses)
         concat(clips, out_path, work)
         shutil.rmtree(work, ignore_errors=True)
         print("done.")
@@ -1367,11 +1456,10 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
         hold = compose(cv, _visible_code(code_lines, beat.revealed),
                        [beat.highlight] if beat.highlight else [],
                        beat.state, caption, os.path.join(work, f"hold_{k:03d}.png"))
-        if beat.narration not in audio_cache:
-            audio_cache[beat.narration] = synth(
-                beat.narration, os.path.join(work, f"seg_{k:03d}"))
+        audio = _cached_synth(synth, audio_cache, beat.narration, work,
+                              f"{k:03d}", split_pauses)
         nclip = os.path.join(work, f"clip_{k:03d}.mp4")
-        make_clip(hold, audio_cache[beat.narration], nclip)
+        make_clip(hold, audio, nclip)
         clips.append(nclip)
 
         if pause > 0 and k < len(beats) - 1:
@@ -1636,7 +1724,7 @@ def _decide_recording(number, tag, text, audio_dir, session_dir, device_name,
 
 def record_narration(source_path, manual_audio_dir, out_path, trace=True,
                      every=False, subtitles=False, typing=False,
-                     typing_speed=TYPE_SPEED, pause=0.0, show_frame=True,
+                     typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT, show_frame=True,
                      build_after=True, input_fn=input,
                      record_fn=_record_until_enter, play_fn=_play,
                      frame_fn=None):
@@ -1857,7 +1945,9 @@ def main():
                          "given (created if missing) [default: current "
                          "directory; env: SNIPPET_CAST_OUTPUT_DIR]")
     ap.add_argument("--tts", choices=list(BACKENDS), default=None,
-                    help="TTS backend [default: say; env: SNIPPET_CAST_TTS]")
+                    help="TTS backend [default: say; env: SNIPPET_CAST_TTS] "
+                         "(--record implies manual; passing --tts explicitly "
+                         "as anything else together with --record is an error)")
     ap.add_argument("--no-trace", action="store_true", default=None,
                     help="don't execute the snippet; skip the state panel "
                          "[env: SNIPPET_CAST_NO_TRACE]")
@@ -1877,7 +1967,7 @@ def main():
     ap.add_argument("--pause", type=float, default=None, metavar="SECONDS",
                     help="seconds of silence to hold on each beat's frame after "
                          "its narration finishes, before the next beat begins "
-                         "[default: 0; env: SNIPPET_CAST_PAUSE]")
+                         f"[default: {PAUSE_DEFAULT}; env: SNIPPET_CAST_PAUSE]")
     ap.add_argument("--export-script", action=argparse.BooleanOptionalAction, default=None,
                     help="print the ordered, numbered narration script and exit "
                          "(no rendering, no ffmpeg/ffprobe needed) — redirect it "
@@ -1887,11 +1977,12 @@ def main():
                     help="directory of pre-recorded audio for --tts manual, named "
                          "001.wav, 002.wav, ... (or .mp3/.m4a/.aiff/.flac/.ogg) "
                          "matching --export-script's numbering "
-                         "[env: SNIPPET_CAST_MANUAL_AUDIO_DIR]")
+                         f"[default: {MANUAL_AUDIO_DIR_DEFAULT}; "
+                         "env: SNIPPET_CAST_MANUAL_AUDIO_DIR]")
     ap.add_argument("--record", action=argparse.BooleanOptionalAction, default=None,
                     help="interactively record narration via the system microphone "
-                         "(macOS only), then build with --tts manual — requires "
-                         "--manual-audio-dir DIR; see SETUP.md [env: SNIPPET_CAST_RECORD]")
+                         "(macOS only), then build with --tts manual (implied "
+                         "automatically); see SETUP.md [env: SNIPPET_CAST_RECORD]")
     ap.add_argument("--no-frame", action="store_true", default=None,
                     help="with --record, don't pop each beat's rendered frame in "
                          "the system image viewer [env: SNIPPET_CAST_NO_FRAME]")
@@ -1920,10 +2011,16 @@ def main():
                         help="output_format [env: ELEVENLABS_FORMAT]")
 
     args = ap.parse_args()
+    # Captured before resolve_env_defaults fills in the "say"/manual_audio_dir
+    # fallbacks below, so --record can tell an explicit --tts/env var apart
+    # from the hardcoded default it's about to silently override.
+    tts_explicit = args.tts is not None or os.environ.get("SNIPPET_CAST_TTS") is not None
+    manual_dir_explicit = (args.manual_audio_dir is not None
+                           or os.environ.get("SNIPPET_CAST_MANUAL_AUDIO_DIR") is not None)
     resolve_env_defaults(
         args, tts="say", no_trace=False, every=False, subtitles=False, typing=False,
-        typing_speed=TYPE_SPEED, pause=0.0, export_script=False,
-        manual_audio_dir=None, record=False, no_frame=False,
+        typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT, export_script=False,
+        manual_audio_dir=MANUAL_AUDIO_DIR_DEFAULT, record=False, no_frame=False,
         name="out", output_dir=".")
     if args.tts not in BACKENDS:
         sys.exit(f"--tts: invalid choice {args.tts!r} (choose from {', '.join(BACKENDS)})")
@@ -1936,10 +2033,14 @@ def main():
         sys.exit("--pause must be >= 0.")
     if args.typing_speed <= 0:
         sys.exit("--typing-speed must be > 0.")
-    if args.manual_audio_dir and args.tts != "manual" and not args.record:
+
+    if args.record:
+        if tts_explicit and args.tts != "manual":
+            sys.exit(f"--record always uses the manual backend; got --tts {args.tts!r}. "
+                     "Drop --tts (or set it to manual) when using --record.")
+        args.tts = "manual"
+    elif manual_dir_explicit and args.tts != "manual":
         sys.exit("--manual-audio-dir only applies with --tts manual (or --record).")
-    if args.record and not args.manual_audio_dir:
-        sys.exit("--record requires --manual-audio-dir DIR.")
 
     if args.export_script:
         for line in export_script(args.input, trace=not args.no_trace, every=args.every):

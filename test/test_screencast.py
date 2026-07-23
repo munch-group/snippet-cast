@@ -580,6 +580,32 @@ def test_resolve_env_defaults_leaves_explicit_values_alone(monkeypatch):
     assert args.pause == 0.5  # explicit value wins over the env var
 
 
+def test_main_record_rejects_conflicting_tts(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["snippet-cast", str(FIB), "--record", "--tts", "say"])
+    with pytest.raises(SystemExit) as excinfo:
+        sc.main()
+    assert "--record always uses the manual backend" in str(excinfo.value)
+
+
+def test_main_record_defaults_manual_audio_dir_and_forces_tts_manual(tmp_path, monkeypatch):
+    out = tmp_path / "out.mp4"
+    calls = []
+
+    def fake_record_narration(source_path, manual_audio_dir, out_path, **kw):
+        calls.append(manual_audio_dir)
+        Path(out_path).write_bytes(b"fake-mp4")
+        return True
+
+    monkeypatch.setattr(sc, "record_narration", fake_record_narration)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["snippet-cast", str(FIB), "-o", str(out), "--record", "--no-frame"])
+
+    sc.main()
+
+    assert calls == [sc.MANUAL_AUDIO_DIR_DEFAULT]
+
+
 def test_resolve_output_path_prefers_explicit_output(tmp_path):
     explicit = str(tmp_path / "explicit.mp4")
     assert resolve_output_path(explicit, str(tmp_path / "unused"), "unused") == explicit
@@ -652,3 +678,115 @@ def test_build_two_pass_pause_applies_to_both_passes_without_trailing_pause(tmp_
     d0 = sc.probe_duration(str(out0))
     d2 = sc.probe_duration(str(out2))
     assert round(d2 - d0, 1) == 4.0  # exactly 2 gaps * 2.0s — no more, no fewer
+
+
+def _fixed_duration_synth(duration):
+    """A stub synth(text, out) -> path that ignores `text` and always
+    returns a silent clip of exactly `duration` seconds — isolates
+    _synth_with_pauses()'s splitting/stitching from any real backend's own
+    timing model (e.g. synth_silent's word-count floor)."""
+    def synth(text, out):
+        path = out + ".wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+             "-t", f"{duration}", path],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return path
+    return synth
+
+
+def test_synth_with_pauses_ignores_single_period(tmp_path):
+    calls = []
+
+    def synth(text, out):
+        calls.append(text)
+        return "unused"
+
+    result = sc._synth_with_pauses(synth, "Hello. World.", str(tmp_path), "t")
+    assert calls == ["Hello. World."]  # a lone '.' is not a pause marker
+    assert result == "unused"
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="requires ffmpeg")
+def test_synth_with_pauses_two_periods_add_0_2s(tmp_path):
+    audio = sc._synth_with_pauses(_fixed_duration_synth(1.0), "Hello.. world",
+                                  str(tmp_path), "t")
+    assert sc.probe_duration(audio) == pytest.approx(1.0 + 0.2 + 1.0, abs=0.05)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="requires ffmpeg")
+def test_synth_with_pauses_four_periods_add_0_4s(tmp_path):
+    audio = sc._synth_with_pauses(_fixed_duration_synth(1.0), "Hello.... world",
+                                  str(tmp_path), "t")
+    assert sc.probe_duration(audio) == pytest.approx(1.0 + 0.4 + 1.0, abs=0.05)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="requires ffmpeg")
+def test_synth_with_pauses_leading_and_trailing_markers(tmp_path):
+    """A run at the very start/end of the text has no speech on that side —
+    only the silence for it should be produced, no empty-string synth call."""
+    calls = []
+
+    def synth(text, out):
+        calls.append(text)
+        return _fixed_duration_synth(1.0)(text, out)
+
+    audio = sc._synth_with_pauses(synth, "..Wait for it", str(tmp_path), "t")
+    assert calls == ["Wait for it"]
+    assert sc.probe_duration(audio) == pytest.approx(0.2 + 1.0, abs=0.05)
+
+
+def test_cached_synth_split_pauses_false_calls_synth_once(tmp_path):
+    """The manual backend (split_pauses=False) must get exactly one synth()
+    call per beat regardless of '..' markers — splitting would consume more
+    than one numbered recording and desync --tts manual's file order."""
+    calls = []
+
+    def synth(text, out):
+        calls.append(text)
+        return f"{out}.wav"
+
+    sc._cached_synth(synth, {}, "Hello.. world", str(tmp_path), "001", split_pauses=False)
+    assert calls == ["Hello.. world"]
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="requires ffmpeg")
+def test_cached_synth_split_pauses_true_splits_on_marker(tmp_path):
+    calls = []
+
+    def synth(text, out):
+        calls.append(text)
+        return _fixed_duration_synth(0.5)(text, out)
+
+    sc._cached_synth(synth, {}, "Hello.. world", str(tmp_path), "001")
+    assert calls == ["Hello", "world"]
+
+
+@pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
+def test_manual_backend_unaffected_by_inline_pause_markers(tmp_path):
+    """Regression test: a manual-backend beat's narration containing '..'
+    must still consume exactly one numbered recording, same as any other
+    beat — pause-splitting is a real-speech-backend-only feature."""
+    src = tmp_path / "paused.py"
+    src.write_text(
+        "a = 1 #: First we set a.. then keep going.\n"
+        "b = 2 #: Now set b.\n"
+    )
+    lines = export_script(str(src))
+    numbered = [l for l in lines if l[:3].isdigit()]
+    assert len(numbered) == 2  # one recording per beat, '..' notwithstanding
+
+    audio_dir = tmp_path / "audio"
+    audio_dir.mkdir()
+    for line in numbered:
+        stem = line[:3]
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+             "-t", "1", str(audio_dir / f"{stem}.wav")],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    out = tmp_path / "manual.mp4"
+    build(str(src), str(out), tts="manual", manual_audio_dir=str(audio_dir))
+
+    assert out.exists()
+    assert out.stat().st_size > 0

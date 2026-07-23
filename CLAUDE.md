@@ -61,7 +61,7 @@ manual recipe used to sanity-check rendered video output.
 |---|---|
 | `src/snippet_cast/screencast.py` | The entire tool (~700 lines): parse → trace → beats → render → TTS → assemble. |
 | `src/snippet_cast/__init__.py` | Public API: exports `build` (programmatic), `export_script`, `record_narration`, and `main` (CLI entry point). |
-| `src/snippet_cast/magic.py` | Jupyter `%%snippet-cast` cell magic (`pip install snippet-cast[jupyter]`; `import snippet_cast.magic` auto-registers it inside a live kernel, or use `%load_ext snippet_cast.magic`). Deliberately **not** imported from `__init__.py`, so `import snippet_cast` never requires IPython — it's a thin wrapper: writes the cell to a temp `.py` file, calls `build()`/`export_script()`/`record_narration()`, displays the result with `IPython.display.Video`. `--record`'s `input()` prompts work the same in a notebook cell as a terminal — no special-casing needed. |
+| `src/snippet_cast/magic.py` | Jupyter `%%snippet-cast` cell magic (`pip install snippet-cast[jupyter]`; both `import snippet_cast` and `import snippet_cast.magic` auto-register it inside a live kernel, or use `%load_ext snippet_cast.magic`). `__init__.py` only imports it conditionally — behind the same `get_ipython()`-gated check `magic.py` itself uses — so `import snippet_cast` outside a live kernel, or without IPython installed, still never requires IPython. It's a thin wrapper: writes the cell to a temp `.py` file, calls `build()`/`export_script()`/`record_narration()`, displays the result with `IPython.display.Video`. `--record`'s `input()` prompts work the same in a notebook cell as a terminal — no special-casing needed. |
 | `SETUP.md` | How to configure every TTS backend (`say`, `manual`/`--record`, Piper, ElevenLabs). |
 | `test/data/fib.py`, `test/data/loop.py`, `test/data/twopass.py` | Sample annotated snippets used by tests and for manual verification (`twopass.py` exercises `/`-split, two-pass narration). |
 | `test/test_screencast.py` | Automated tests: parsing, tracing, beat construction, and a full-render smoke test. |
@@ -177,6 +177,38 @@ trace, not marker order, so reordering markers would have no effect on code
 beats and would silently desync the every-mode comment-slotting logic, which
 assumes `comment_marks` stays in ascending line order).
 
+#### Inline pauses within a narration line (orthogonal to everything above)
+
+A run of 2+ consecutive periods inside a `#:` narration (after `split_narration`/
+`_parse_order` have already done their own splitting/stripping — this operates
+on final beat narration text, at synth time, not at marker-parsing time) is an
+inline pause, not spoken: `PAUSE_MARKER_RE` (`r"(\.{2,})"`, capturing group —
+`re.split` silently drops the delimiter without one, which was a real bug
+caught by a test expecting both sides of the split) matches the run;
+`_synth_with_pauses()` splits the text on it, synthesizes each non-empty side
+separately, and generates `PAUSE_PER_PERIOD` seconds of silence per period in
+the run (`_make_silence()`, an `anullsrc` clip) in its place, then stitches
+everything back into one audio file with `_concat_audio_pieces()` (ffmpeg's
+`concat` *filter*, not the `-c copy` demuxer `concat()` uses for whole clips —
+the filter decodes each input first, so pieces from different backends never
+need matching containers/sample rates going in). A single period is ordinary
+end-of-sentence punctuation and never matches (`{2,}`). A narration with no
+such run takes a fast path straight back to one plain, unmodified `synth()`
+call — exactly as if this feature didn't exist.
+
+`_cached_synth()` (the single choke point for every `synth()` call, both
+passes and both two-pass and single-pass mode) takes a `split_pauses` bool
+gating this: `_render_from_beats()` computes it once as `tts != "manual"` and
+threads it through `_render_two_pass()`'s three call sites and its own
+single-pass loop. The manual backend must always get exactly ONE `synth()`
+call per beat regardless of `split_pauses` — splitting there would consume
+more than one numbered recording per beat and silently desync `--tts
+manual`'s file order from `export_script()`'s numbering (the same class of
+bug the manual-backend/`--record` numbering invariants elsewhere in this file
+already guard against). A human recording narration for `--tts manual`/
+`--record` just reads the dots as a natural pause cue — nothing needs
+splicing.
+
 ### Critical invariants — do not break these
 
 These are non-obvious and fail *silently* or only under specific flag
@@ -246,6 +278,14 @@ combinations:
     background) and stores the result on `Canvas.cap_fg`/`cap_rule` — don't
     reintroduce a hardcoded `COL_CAPTION`/`COL_RULE` reference in
     `_draw_caption()`.
+14. **Inline `..` pause markers must never reach the manual backend's
+    splitting path.** `_cached_synth(..., split_pauses=...)` is `False`
+    exactly when `tts == "manual"`; splitting there would call
+    `synth_manual()` more than once for a beat whose narration contains a
+    pause marker, silently shifting every subsequent beat's file number out
+    of alignment with `--export-script`'s numbering — the same class of bug
+    the manual-backend/`--record` numbering code elsewhere already guards
+    against (see "TTS backends" below).
 
 ### TTS backends
 
@@ -543,6 +583,10 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
 - **Custom narration order:** add a leading `N)` to a `#:` narration
   (`_parse_order`/`order_markers`, `_ORDER_RE`); first-exec only, per-pass in
   two-pass mode, no flag needed — all-or-none per pass, else `sys.exit`.
+- **Inline pauses:** write 2+ consecutive periods in a `#:` narration
+  (`PAUSE_MARKER_RE`); `PAUSE_PER_PERIOD` seconds of silence per period. Works
+  in any mode, both passes of two-pass mode, no flag needed — except
+  `--tts manual`, which ignores it (critical invariant 14).
 - **Manual-recording tooling:** `--export-script` (`export_script()` /
   `_format_script()`) and `--tts manual` (`make_manual_backend()`) — see the
   "Two-pass narration" architecture note above for how their numbering stays
@@ -560,9 +604,12 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
 - **Jupyter `%%snippet-cast` cell magic:** lives in `src/snippet_cast/magic.py`
   (`SnippetCastMagics`). `import snippet_cast.magic` auto-registers it when
   run inside a live kernel (module-level `get_ipython()` check calls
-  `load_ipython_extension()` itself); `%load_ext snippet_cast.magic` still
-  works and is the only option outside a live kernel or to force
-  re-registration under autoreload. It's a thin wrapper — writes the cell
+  `load_ipython_extension()` itself); `snippet_cast/__init__.py` runs the
+  same check (`_register_magic_if_in_notebook()`) and only then imports
+  `magic.py`, so a plain `import snippet_cast` registers it too — without
+  ever importing `magic.py` (or requiring IPython) outside a live kernel.
+  `%load_ext snippet_cast.magic` still works and is the only option outside
+  a live kernel or to force re-registration under autoreload. It's a thin wrapper — writes the cell
   body to a temp `.py` file and calls `build()`/`export_script()` unchanged,
   so new CLI flags/backends need a matching `@argument(...)` added there to
   be reachable from a notebook, but need no logic changes. A new option also

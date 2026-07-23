@@ -1,5 +1,0 @@
-# Sphinx inventory version 2
-# Project: snippet-cast
-# Version: 0.0.9999
-# The remainder of this file is compressed using zlib.
-snippet_cast.screencast.build py:function 1 api/build.html#snippet_cast.screencast.build -
