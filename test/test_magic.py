@@ -118,6 +118,69 @@ def test_cell_magic_record_calls_record_narration_and_displays_video(ip, tmp_pat
     assert isinstance(kw["frame_fn"], sc_magic._LiveRecordView)
 
 
+def test_cell_magic_record_clears_live_view_before_showing_video(ip, tmp_path, monkeypatch):
+    """Regression test: the per-beat frame/status live view should be
+    emptied once the real result (the video) is about to be shown, not
+    left behind as stale clutter under it."""
+    out = tmp_path / "out.mp4"
+    audio_dir = tmp_path / "audio"
+    cleared = []
+
+    def fake_record_narration(source_path, manual_audio_dir, out_path, **kw):
+        Path(out_path).write_bytes(b"fake-mp4")
+        return True
+
+    monkeypatch.setattr(sc_magic, "record_narration", fake_record_narration)
+    orig_clear = sc_magic._LiveRecordView.clear
+
+    def spy_clear(self):
+        cleared.append(True)
+        return orig_clear(self)
+
+    monkeypatch.setattr(sc_magic._LiveRecordView, "clear", spy_clear)
+
+    cell = FIB.read_text()
+    result = ip.run_cell(
+        f"%%snippet-cast -o {out} --manual-audio-dir {audio_dir} --record --no-frame\n{cell}")
+
+    assert result.success
+    assert cleared == [True]
+
+
+def test_cell_magic_record_skips_display_and_clear_when_build_was_skipped(ip, tmp_path, monkeypatch):
+    """Regression test: record_narration() returns True both when the
+    build actually ran AND when it committed but skipped build_after (e.g.
+    beats still missing recordings — see screencast.py's pre-build check).
+    In the latter case out_path never gets created; the cell magic must
+    not try to display() a nonexistent file, and must leave the live view
+    (which already shows record_narration()'s own explanatory note)
+    visible instead of clearing it."""
+    out = tmp_path / "out.mp4"
+    audio_dir = tmp_path / "audio"
+    cleared = []
+
+    def fake_record_narration(source_path, manual_audio_dir, out_path, **kw):
+        print("note: 2 beat(s) still have no recording: 001, 002.")
+        return True  # committed, but no file written -- build_after was skipped
+
+    monkeypatch.setattr(sc_magic, "record_narration", fake_record_narration)
+    orig_clear = sc_magic._LiveRecordView.clear
+
+    def spy_clear(self):
+        cleared.append(True)
+        return orig_clear(self)
+
+    monkeypatch.setattr(sc_magic._LiveRecordView, "clear", spy_clear)
+
+    cell = FIB.read_text()
+    result = ip.run_cell(
+        f"%%snippet-cast -o {out} --manual-audio-dir {audio_dir} --record --no-frame\n{cell}")
+
+    assert result.success  # must not crash trying to display a missing file
+    assert not out.exists()
+    assert cleared == []  # the diagnostic note must stay visible, not get wiped
+
+
 def test_cell_magic_record_aborted_skips_display(ip, tmp_path, monkeypatch):
     out = tmp_path / "out.mp4"
     audio_dir = tmp_path / "audio"
@@ -160,10 +223,10 @@ def test_live_record_view_updates_status_and_frame_in_place(tmp_path, monkeypatc
     view.write("line two\n")
     view.write("line three\n")  # should push "line one" out of the window
 
-    status_calls = [c for c in calls if isinstance(c[1], str)]
+    status_calls = [c for c in calls if isinstance(c[1], sc_magic.HTML)]
     assert sum(1 for kind, _ in status_calls if kind == "display") == 1
     assert sum(1 for kind, _ in status_calls if kind == "update") == 2
-    assert status_calls[-1] == ("update", "line two\nline three")
+    assert status_calls[-1][1].data == "<pre>line two\nline three</pre>"
 
     frame1 = tmp_path / "frame1.png"
     frame2 = tmp_path / "frame2.png"
@@ -172,21 +235,33 @@ def test_live_record_view_updates_status_and_frame_in_place(tmp_path, monkeypatc
     view(str(frame1))
     view(str(frame2))
 
-    frame_calls = [c for c in calls if not isinstance(c[1], str)]
+    frame_calls = [c for c in calls if not isinstance(c[1], sc_magic.HTML)]
     assert sum(1 for kind, _ in frame_calls if kind == "display") == 1
     assert sum(1 for kind, _ in frame_calls if kind == "update") == 1
 
 
-def test_cell_magic_record_output_goes_through_live_view_not_real_stdout(ip, tmp_path, monkeypatch, capsys):
+def test_live_record_view_clear_calls_clear_output(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sc_magic, "clear_output", lambda wait=False: calls.append(wait))
+
+    sc_magic._LiveRecordView().clear()
+
+    assert calls == [True]
+
+
+def test_cell_magic_record_output_goes_through_live_view_not_real_stdout(ip, tmp_path, monkeypatch):
     """Regression test: print()s made during a --record session (e.g. the
     per-beat '001 [pass 2, beat 1] ...' lines) must be captured by the
     redirect_stdout(view) wrapper and routed through display()'s
     create-once/update-thereafter path, not leak straight to stdout as
-    separate accumulating lines. The globalipapp test shell has no real
-    frontend, so display()/update() fall back to printing each object's
-    repr() — that's expected and still lets this test verify the SECOND
-    print() triggered an update() carrying the ACCUMULATED text (both
-    lines together), not a second independent, disconnected display()."""
+    separate accumulating lines. Spies on the REAL display() (and the
+    handle it returns) rather than faking it, so this also stands as the
+    regression test for two bugs only caught by going through the real
+    IPython display machinery: a RecursionError from calling display()
+    while sys.stdout was still redirected to the object display() itself
+    writes through, and status text rendering as a quoted, \\n-escaped
+    repr() instead of readable multi-line text (fixed by wrapping in
+    HTML('<pre>...</pre>') rather than passing a bare str to display())."""
     out = tmp_path / "out.mp4"
     audio_dir = tmp_path / "audio"
 
@@ -198,11 +273,31 @@ def test_cell_magic_record_output_goes_through_live_view_not_real_stdout(ip, tmp
 
     monkeypatch.setattr(sc_magic, "record_narration", fake_record_narration)
 
+    rendered = []
+    orig_display = sc_magic.display
+
+    def spy_display(obj, display_id=None):
+        handle = orig_display(obj, display_id=display_id)
+        rendered.append(obj)
+        if handle is not None:  # display() returns None unless display_id is set
+            orig_update = handle.update
+
+            def spy_update(o):
+                rendered.append(o)
+                return orig_update(o)
+
+            handle.update = spy_update
+        return handle
+
+    monkeypatch.setattr(sc_magic, "display", spy_display)
+
     cell = FIB.read_text()
     result = ip.run_cell(
         f"%%snippet-cast -o {out} --manual-audio-dir {audio_dir} --record --no-frame\n{cell}")
 
     assert result.success
-    output = capsys.readouterr().out
-    combined = "001  [pass 2, beat 1]  some narration\nrecording — press Enter to stop."
-    assert repr(combined) in output
+    html_objs = [o for o in rendered if isinstance(o, sc_magic.HTML)]
+    assert len(html_objs) >= 2  # at least one create + one update
+    assert "some narration" in html_objs[0].data
+    assert "recording — press Enter to stop." in html_objs[-1].data
+    assert "\\n" not in html_objs[-1].data  # real newline, not an escaped one

@@ -349,6 +349,39 @@ the caller wraps it — and temporarily restoring that specific object (not
 `sys.__stdout__`, which bypasses ipykernel's own stdout routing and
 wouldn't land in the cell) around each `display()`/`.update()` call.
 
+Two more real bugs, both only surfaced by testing through the actual
+IPython display machinery (a plain unit test with a stubbed-out `display()`
+wouldn't have caught either):
+1. `display()` on a bare Python `str` renders it via `repr()` — quoted,
+   with literal `\n` escapes, not actual line breaks — confirmed this is
+   real `display()` behavior, not a headless-test-harness artifact.
+   `write()` wraps the text in `HTML(f"<pre>{html.escape(text)}</pre>")`
+   instead; `<pre>` preserves whitespace/newlines exactly, unambiguously,
+   in any HTML-capable frontend.
+2. Python's `print()` calls the target's `.write()` **twice** per line —
+   once with the content, once more with just the trailing `"\n"` (its
+   default `end`). `write()` used to recompute and re-`display()`/`.update()`
+   on every single call, including that first content-only one where
+   `self._lines` is still empty — flashing the display through the "no
+   complete line yet" placeholder state on every `print()`. Fixed by only
+   updating once a `"\n"` actually completes a line (tracked via a local
+   `added` flag in the split loop).
+
+`_LiveRecordView.clear()` (`clear_output(wait=True)`, same
+capture-real-stdout-first pattern as `write()`/`__call__`) empties the
+status/frame areas entirely — called from `magic.py`'s `--record` branch
+right before `display(Video(...))`, so the per-beat scrollback doesn't
+linger as clutter under the actual result. **Only** called on a genuine
+success — `committed=True` AND `out_path` actually exists. `record_narration()`
+returning `True` does NOT by itself mean a video got built: it's also `True`
+when the session committed cleanly but `build_after` was skipped because
+beats still lack a recording (see the pre-build check above) — in that case
+`out_path` is never created, and the cell magic must neither call
+`view.clear()` (the "still have no recording" note is exactly what the user
+needs to see next) nor attempt `display(Video(out_path, ...))` on a file
+that doesn't exist (an easy latent crash — `IPython.display.Video`, like
+`Image`, reads eagerly at construction, so this fails immediately, not
+lazily on render). Guarded by a plain `os.path.exists(out_path)` check.
 Two bugs worth knowing if you touch
 `_decide_recording()`/`_record_until_enter()`, both confirmed via a real
 `--record` session, not just reasoning about the code:

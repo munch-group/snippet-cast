@@ -42,6 +42,7 @@ env vars) works exactly as on the command line.
 """
 import argparse
 import contextlib
+import html
 import os
 import sys
 import tempfile
@@ -49,7 +50,7 @@ import tempfile
 from IPython import get_ipython
 from IPython.core.magic import Magics, cell_magic, magics_class
 from IPython.core.magic_arguments import argument, magic_arguments, parse_argstring
-from IPython.display import Image, Video, display
+from IPython.display import HTML, Image, Video, clear_output, display
 
 from .screencast import (
     BACKENDS,
@@ -89,17 +90,32 @@ class _LiveRecordView:
 
     def write(self, s):
         self._buf += s
+        added = False
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
             if line:
                 self._lines.append(line)
+                added = True
+        if not added:
+            # print() calls .write() twice per line: once with the content,
+            # once more with just the trailing "\n" (its default `end`).
+            # Updating on the FIRST (no newline yet, no complete line) would
+            # flash the display through an incomplete/placeholder state on
+            # every single print() -- wait for a full line instead.
+            return
         self._lines = self._lines[-self._max_lines:]
         text = "\n".join(self._lines) or " "  # never empty: display() dislikes ""
+        # HTML + <pre>, not a bare str: display() renders a plain string via
+        # repr() (quoted, with literal \n escapes -- confirmed, not just a
+        # test-harness quirk), which is not what a multi-line status readout
+        # should look like. <pre> preserves whitespace/newlines exactly,
+        # unambiguously, in any HTML-capable frontend.
+        rendered = HTML(f"<pre>{html.escape(text)}</pre>")
         with contextlib.redirect_stdout(self._real_stdout):
             if self._status_handle is None:
-                self._status_handle = display(text, display_id=True)
+                self._status_handle = display(rendered, display_id=True)
             else:
-                self._status_handle.update(text)
+                self._status_handle.update(rendered)
 
     def flush(self):
         pass
@@ -111,6 +127,16 @@ class _LiveRecordView:
                 self._frame_handle = display(img, display_id=True)
             else:
                 self._frame_handle.update(img)
+
+    def clear(self):
+        """Empty the status/frame areas entirely. Call once the session's
+        real result — the rendered video — is about to replace them, so the
+        ephemeral per-beat scrollback doesn't linger underneath it. Do NOT
+        call this on an aborted/errored/incomplete session — that trail
+        (e.g. 'aborted — no changes made', or a 'still have no recording'
+        note) is exactly what the user needs to see, not something to wipe."""
+        with contextlib.redirect_stdout(self._real_stdout):
+            clear_output(wait=True)
 
 
 @magics_class
@@ -217,6 +243,11 @@ class SnippetCastMagics(Magics):
                     return
                 if not committed:
                     return  # aborted mid-session; record_narration already said so
+                if not os.path.exists(out_path):
+                    return  # committed, but build_after was skipped (a
+                             # missing-recordings note is already in view —
+                             # leave it visible rather than clearing it)
+                view.clear()
                 display(Video(out_path, embed=args.embed))
                 return
 
