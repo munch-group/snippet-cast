@@ -184,30 +184,58 @@ A run of 2+ consecutive periods inside a `#:` narration (after `split_narration`
 on final beat narration text, at synth time, not at marker-parsing time) is an
 inline pause, not spoken: `PAUSE_MARKER_RE` (`r"(\.{2,})"`, capturing group —
 `re.split` silently drops the delimiter without one, which was a real bug
-caught by a test expecting both sides of the split) matches the run;
-`_synth_with_pauses()` splits the text on it, synthesizes each non-empty side
-separately, and generates `PAUSE_PER_PERIOD` seconds of silence per period in
-the run (`_make_silence()`, an `anullsrc` clip) in its place, then stitches
-everything back into one audio file with `_concat_audio_pieces()` (ffmpeg's
-`concat` *filter*, not the `-c copy` demuxer `concat()` uses for whole clips —
-the filter decodes each input first, so pieces from different backends never
-need matching containers/sample rates going in). A single period is ordinary
-end-of-sentence punctuation and never matches (`{2,}`). A narration with no
-such run takes a fast path straight back to one plain, unmodified `synth()`
-call — exactly as if this feature didn't exist.
+caught by a test expecting both sides of the split) matches the run. A single
+period is ordinary end-of-sentence punctuation and never matches (`{2,}`).
+How the run is honored — and, for `say` only, a second markup transform for
+ALL-CAPS emphasis — is decided per-backend by a three-way `pause_mode`:
+
+- `"split"` (every backend except the two below) — `_synth_with_pauses()`
+  splits the text on the run, synthesizes each non-empty side separately, and
+  generates `PAUSE_PER_PERIOD` seconds of silence per period in the run
+  (`_make_silence()`, an `anullsrc` clip) in its place, then stitches
+  everything back into one audio file with `_concat_audio_pieces()` (ffmpeg's
+  `concat` *filter*, not the `-c copy` demuxer `concat()` uses for whole clips
+  — the filter decodes each input first, so pieces from different backends
+  never need matching containers/sample rates going in).
+- `"say"` — macOS `say` has its *own* native inline markup, so instead of
+  splitting into separate synth calls, `_say_markup()` rewrites the text in
+  place and `say` gets ONE call with better prosody across the pause/emphasis
+  than two stitched fragments would have:
+  - `_say_pause_markup()` rewrites each run to `[[slnc N]]`, N =
+    `SAY_PAUSE_MS_PER_PERIOD` (200) milliseconds *per period* — tuned
+    independently of (and currently double) `PAUSE_PER_PERIOD`, since `say`'s
+    own `[[slnc]]` reads differently than a spliced-in silence clip.
+  - `_say_emphasis_markup()` separately flanks each run of 2+ consecutive
+    ALL-CAPS words (`SAY_EMPHASIS_RE`) with `say`'s `[[emph +]] ... [[emph
+    -]]`, e.g. "Please NEVER DO THAT AGAIN" -> "Please [[emph +]] NEVER DO
+    THAT AGAIN [[emph -]]". A simple heuristic, no acronym detection — a
+    narration mentioning "the URL" gets it flanked too. The lookaround
+    (`(?<![A-Za-z])...(?![a-z])`) excludes a mixed-case word entirely (e.g.
+    "IDentifier" is left untouched, never sliced into "ID" + "entifier").
+  - Both transforms operate on disjoint character classes (periods vs.
+    uppercase letters) so `_say_markup()` can apply them in either order.
+- `"none"` (the manual backend only) — call `synth` once on the text
+  unmodified. Splitting (or rewriting) there would desync `--tts manual`'s
+  file numbering — see below.
+
+A narration with no `..` run (and, for `say`, no ALL-CAPS run either) takes a
+fast path straight back to one plain, unmodified `synth()` call in every mode
+— exactly as if this feature didn't exist.
 
 `_cached_synth()` (the single choke point for every `synth()` call, both
-passes and both two-pass and single-pass mode) takes a `split_pauses` bool
-gating this: `_render_from_beats()` computes it once as `tts != "manual"` and
-threads it through `_render_two_pass()`'s three call sites and its own
-single-pass loop. The manual backend must always get exactly ONE `synth()`
-call per beat regardless of `split_pauses` — splitting there would consume
-more than one numbered recording per beat and silently desync `--tts
-manual`'s file order from `export_script()`'s numbering (the same class of
-bug the manual-backend/`--record` numbering invariants elsewhere in this file
-already guard against). A human recording narration for `--tts manual`/
-`--record` just reads the dots as a natural pause cue — nothing needs
-splicing.
+passes and both two-pass and single-pass mode) takes this `pause_mode`
+string: `_render_from_beats()` computes it once (`"none"` if
+`tts=="manual"`, `"say"` if `tts=="say"`, else `"split"`) and threads it
+through `_render_two_pass()`'s three call sites and its own single-pass loop.
+The manual backend must always get exactly ONE `synth()` call per beat,
+completely unmodified — splitting OR rewriting there would consume more than
+one numbered recording per beat (or desync playback content from what a
+human actually recorded) and silently desync `--tts manual`'s file order
+from `export_script()`'s numbering (the same class of bug the manual-backend/
+`--record` numbering invariants elsewhere in this file already guard
+against). A human recording narration for `--tts manual`/`--record` just
+reads the dots (and shouts the caps) as natural cues — nothing needs
+splicing or rewriting.
 
 ### Critical invariants — do not break these
 
@@ -278,14 +306,16 @@ combinations:
     background) and stores the result on `Canvas.cap_fg`/`cap_rule` — don't
     reintroduce a hardcoded `COL_CAPTION`/`COL_RULE` reference in
     `_draw_caption()`.
-14. **Inline `..` pause markers must never reach the manual backend's
-    splitting path.** `_cached_synth(..., split_pauses=...)` is `False`
-    exactly when `tts == "manual"`; splitting there would call
-    `synth_manual()` more than once for a beat whose narration contains a
-    pause marker, silently shifting every subsequent beat's file number out
-    of alignment with `--export-script`'s numbering — the same class of bug
-    the manual-backend/`--record` numbering code elsewhere already guards
-    against (see "TTS backends" below).
+14. **Inline `..` pause markers (and `say`'s ALL-CAPS emphasis rewrite) must
+    never reach the manual backend.** `_cached_synth(..., pause_mode=...)` is
+    `"none"` exactly when `tts == "manual"`, never `"split"` or `"say"`;
+    either of those would call `synth_manual()` more than once for a beat
+    whose narration contains a pause marker (`"split"`), or hand it rewritten
+    `[[slnc]]`/`[[emph]]` text that doesn't match what a human actually
+    recorded (`"say"`), silently shifting every subsequent beat's file number
+    out of alignment with `--export-script`'s numbering — the same class of
+    bug the manual-backend/`--record` numbering code elsewhere already
+    guards against (see "TTS backends" below).
 
 ### TTS backends
 
@@ -584,9 +614,16 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   (`_parse_order`/`order_markers`, `_ORDER_RE`); first-exec only, per-pass in
   two-pass mode, no flag needed — all-or-none per pass, else `sys.exit`.
 - **Inline pauses:** write 2+ consecutive periods in a `#:` narration
-  (`PAUSE_MARKER_RE`); `PAUSE_PER_PERIOD` seconds of silence per period. Works
-  in any mode, both passes of two-pass mode, no flag needed — except
-  `--tts manual`, which ignores it (critical invariant 14).
+  (`PAUSE_MARKER_RE`); `PAUSE_PER_PERIOD` seconds of silence per period
+  (`--tts say` instead rewrites it to its own `[[slnc N]]` markup, N =
+  `SAY_PAUSE_MS_PER_PERIOD` per period — see `_say_markup`). Works in any
+  mode, both passes of two-pass mode, no flag needed — except `--tts manual`,
+  which ignores it (critical invariant 14).
+- **`say`-only ALL-CAPS emphasis:** a run of 2+ consecutive ALL-CAPS words in
+  a `#:` narration is flanked with `say`'s `[[emph +]] ... [[emph -]]`
+  (`SAY_EMPHASIS_RE`/`_say_emphasis_markup`) whenever `--tts say` is used; a
+  no-op for every other backend, including `--tts manual` (critical
+  invariant 14).
 - **Manual-recording tooling:** `--export-script` (`export_script()` /
   `_format_script()`) and `--tts manual` (`make_manual_backend()`) — see the
   "Two-pass narration" architecture note above for how their numbering stays

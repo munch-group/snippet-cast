@@ -18,7 +18,13 @@ narration inserts a pause instead of being spoken — 0.1s of silence per period
 so `".."` is a 0.2s pause and `"...."` is 0.4s, e.g.
 `#: Let's slow down here.. and look closer.` A single period is still just
 normal end-of-sentence punctuation. This works with every backend below
-except `manual` (a human just reads the dots as a pause cue instead).
+except `manual` (a human just reads the dots as a pause cue instead). `--tts
+say` handles it a little differently — see below.
+
+Also: with `--tts say`, a run of 2 or more consecutive ALL-CAPS words in a
+`#:` narration is automatically read with emphasis, e.g.
+`#: Please NEVER DO THAT AGAIN.` Every other backend (including `manual`)
+ignores this — it's `say`-specific, same as the paragraph above.
 
 ---
 
@@ -37,9 +43,17 @@ snippet-cast fib.py -o out.mp4 --tts say
 It uses whatever voice is set as the system default (System Settings →
 Accessibility → Spoken Content → System Voice); `synth_say()` doesn't expose a
 `--say-voice`/rate flag, so every line gets the same voice at the same rate.
-If you want a different voice, a different rate, per-line control, or
-inline `say` markup (`[[slnc 300]]`, `[[rate 170]]`, …), don't reach for
-`--tts say` — drive `say` yourself with the **manual** backend below.
+Two pieces of `say`'s own inline markup are generated for you automatically
+from plain narration text — no markup to write by hand: a `#:` narration's
+`".."`/`"...."`/etc. becomes `[[slnc N]]` (see the pause tip above; N =
+200ms per period, tuned separately from the generic 100ms/period used by
+other backends, since `say`'s own `[[slnc]]` reads differently), and any
+ALL-CAPS run becomes `[[emph +]] ... [[emph -]]`. If you want a different
+voice, a different rate, or any *other* inline `say` markup (`[[rate 170]]`,
+`[[volm 80]]`, …), don't reach for `--tts say` — drive `say` yourself with
+the **manual** backend below (which also lets you write `[[slnc]]`/`[[emph]]`
+yourself, with full manual control, if the automatic mapping isn't what you
+want).
 
 Linux/Windows have no `say` binary; use `--tts silent` for a free proofing
 pass there instead, and Piper/ElevenLabs for a real voice.
@@ -52,9 +66,10 @@ requests them. Use it for a human voiceover, or to drive `say` (or any other
 tool) by hand, line by line, with full control snippet-cast's other backends
 don't give you.
 
-(If a narration uses "..", "....", etc. for an inline pause — see below — it's
-purely a cue for you to read it that way; the manual backend doesn't splice
-anything, so it still needs exactly one recording per beat.)
+(If a narration uses "..", "....", etc. for an inline pause, or ALL-CAPS for
+emphasis — see below — those are purely cues for you to read it that way; the
+manual backend doesn't splice or rewrite anything, so it still needs exactly
+one recording per beat.)
 
 ### 1. Export the narration script
 

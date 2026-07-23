@@ -192,6 +192,12 @@ PAUSE_DEFAULT = 0.8     # default seconds of silence held on each beat after its
 MANUAL_AUDIO_DIR_DEFAULT = "./manual_audio"  # default --manual-audio-dir for CLI/notebook
 PAUSE_MARKER_RE = re.compile(r"(\.{2,})")  # 2+ consecutive periods in narration = an inline pause
 PAUSE_PER_PERIOD = 0.1  # seconds of silence per "." in a PAUSE_MARKER_RE run (".."->0.2s, "...."->0.4s)
+SAY_PAUSE_MS_PER_PERIOD = 200  # ms per "." for the say backend's native [[slnc]] markup (see
+                                # _say_pause_markup) — tuned separately from PAUSE_PER_PERIOD;
+                                # say's own [[slnc]] reads differently than a spliced-in silence clip
+SAY_EMPHASIS_RE = re.compile(r"(?<![A-Za-z])[A-Z]{2,}(?:\s+[A-Z]{2,})*(?![a-z])")
+                                # a run of ALL-CAPS words (2+ letters each), for the say backend's
+                                # native [[emph +]]/[[emph -]] markup — see _say_emphasis_markup
 AUDIO_AR = "44100"      # normalise all clips so concat -c copy is safe
 AUDIO_AC = "2"
 MANUAL_AUDIO_EXTS = (".wav", ".mp3", ".m4a", ".aiff", ".flac", ".ogg")  # --tts manual / --record
@@ -1169,29 +1175,72 @@ def _synth_with_pauses(synth, text, work, tag):
     return _concat_audio_pieces(pieces, work, f"{tag}_joined")
 
 
-def _cached_synth(synth, audio_cache, text, work, tag, split_pauses=True):
+def _say_pause_markup(text):
+    """Rewrite each PAUSE_MARKER_RE run of periods into macOS `say`'s own
+    inline pause markup, `[[slnc N]]` (N milliseconds, SAY_PAUSE_MS_PER_PERIOD
+    per period) — `say` interprets this natively, so the whole line is
+    synthesized in ONE call with `say`'s own prosody carrying across the
+    pause, instead of stitching two separately-synthesized fragments with a
+    generated silence clip (see _synth_with_pauses, used for every other
+    backend). A narration with no such run comes back unchanged (`.sub()`
+    with no match is a no-op)."""
+    return PAUSE_MARKER_RE.sub(
+        lambda m: f"[[slnc {len(m.group(0)) * SAY_PAUSE_MS_PER_PERIOD}]]", text)
+
+
+def _say_emphasis_markup(text):
+    """Flank each run of 2+ consecutive ALL-CAPS words (SAY_EMPHASIS_RE) with
+    macOS `say`'s own emphasis markup, `[[emph +]] ... [[emph -]]` — e.g.
+    "Please NEVER DO THAT AGAIN" becomes "Please [[emph +]] NEVER DO THAT
+    AGAIN [[emph -]]". A simple heuristic: no acronym detection, so a
+    narration that mentions e.g. "the URL" gets it flanked too. The
+    lookaround in SAY_EMPHASIS_RE excludes a mixed-case word entirely (e.g.
+    "IDentifier" is left untouched, not sliced into "ID" + "entifier").
+    A narration with no such run comes back unchanged."""
+    return SAY_EMPHASIS_RE.sub(lambda m: f"[[emph +]] {m.group(0)} [[emph -]]", text)
+
+
+def _say_markup(text):
+    """Apply every say-specific inline markup transform to `text` before a
+    single synth_say() call: inline pauses (_say_pause_markup) and ALL-CAPS
+    emphasis (_say_emphasis_markup). Order doesn't matter between the two —
+    one matches runs of periods, the other runs of uppercase letters, so
+    they never overlap."""
+    return _say_emphasis_markup(_say_pause_markup(text))
+
+
+def _cached_synth(synth, audio_cache, text, work, tag, pause_mode="split"):
     """audio_cache-deduped synth call: identical narration text (e.g. an
     un-interpolated loop line, or the same line reused across passes) is
     synthesized once and reused. Same semantics as the legacy loop's inline
     cache check, factored out because two-pass rendering needs it at
     multiple call sites.
 
-    `split_pauses=False` skips _synth_with_pauses() and calls `synth` exactly
-    once regardless of any '..' pause markers in `text` — used for the
-    manual backend only, where splitting would consume more than one
-    numbered recording per beat and desync --tts manual's file order with
-    --export-script's (a human reads the dots as a natural pause cue when
-    recording; nothing needs to be spliced)."""
+    `pause_mode` picks how `text`'s inline pause markers ('..') — and, for
+    "say", ALL-CAPS emphasis too — are honored:
+      "split" (default) — _synth_with_pauses(): split/synthesize/stitch with
+        a generated silence clip. Used for every backend except the two below.
+      "say"   — _say_markup(): rewrite pause markers to `[[slnc N]]` and
+        ALL-CAPS runs to `[[emph +]] ... [[emph -]]` inline, then call
+        `synth` exactly once. `say`-only, since it's the one backend with
+        this native markup.
+      "none"  — call `synth` exactly once on `text` unmodified. The manual
+        backend only: splitting would consume more than one numbered
+        recording per beat and desync --tts manual's file order with
+        --export-script's (a human reads the dots as a natural pause cue when
+        recording; nothing needs to be spliced)."""
     if text not in audio_cache:
-        if split_pauses:
+        if pause_mode == "split":
             audio_cache[text] = _synth_with_pauses(synth, text, work, tag)
+        elif pause_mode == "say":
+            audio_cache[text] = synth(_say_markup(text), os.path.join(work, f"seg_{tag}"))
         else:
             audio_cache[text] = synth(text, os.path.join(work, f"seg_{tag}"))
     return audio_cache[text]
 
 
 def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
-                     typing_speed, pause, split_pauses):
+                     typing_speed, pause, pause_mode):
     """Render two-pass mode's clips and return the ordered clip-path list
     (all of pass 1, then all of pass 2) ready for concat()."""
     clips = []
@@ -1205,7 +1254,7 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
         if len(stream) >= 2 and stream.strip():
             if beat.narration:
                 audio = _cached_synth(synth, audio_cache, beat.narration, work,
-                                      f"p1a_{k:03d}", split_pauses)
+                                      f"p1a_{k:03d}", pause_mode)
                 duration = probe_duration(audio)
             else:
                 audio, duration = None, len(stream) * typing_speed
@@ -1220,7 +1269,7 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
             hold = compose(cv, _visible_code(code_lines, beat.revealed), [], {},
                            caption, os.path.join(work, f"p1_hold_{k:03d}.png"))
             audio = _cached_synth(synth, audio_cache, beat.narration, work,
-                                  f"p1b_{k:03d}", split_pauses)
+                                  f"p1b_{k:03d}", pause_mode)
             clip = os.path.join(work, f"p1_clip_{k:03d}.mp4")
             make_clip(hold, audio, clip)
             clips.append(clip)
@@ -1253,7 +1302,7 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
         clip = os.path.join(work, f"p2_clip_{k:03d}.mp4")
         if beat.narration:
             audio = _cached_synth(synth, audio_cache, beat.narration, work,
-                                  f"p2_{k:03d}", split_pauses)
+                                  f"p2_{k:03d}", pause_mode)
             make_clip(hold, audio, clip)
         else:
             make_pause_clip(hold, PART2_EMPTY_HOLD, clip)
@@ -1357,17 +1406,23 @@ def build(source_path, out_path, tts, trace=True, every=False,
     top (narrated by the text after `/`, exactly today's single-pass
     mechanics). A file with no `/` anywhere renders exactly as before.
 
-    Inline pauses within a narration line
-    --------------------------------------
+    Inline pauses (and, for `say`, emphasis) within a narration line
+    -------------------------------------------------------------------
     A run of 2+ consecutive periods inside a `#:` narration (".." , "....",
     ...) inserts a pause mid-line instead of being spoken: `PAUSE_PER_PERIOD`
     seconds of silence per period (".." -> 0.2s, "...." -> 0.4s), with the
     text on either side synthesized separately and stitched together (see
     `_synth_with_pauses`). A single period is ordinary end-of-sentence
-    punctuation and is untouched. Applies to every real speech backend; the
-    manual backend ignores it (a human recording narration reads the dots as
-    a natural pause cue, and splitting would desync `--tts manual`'s file
-    numbering with `export_script()`'s).
+    punctuation and is untouched. `tts="say"` handles this differently — it
+    rewrites the run in place to `say`'s own `[[slnc N]]` pause markup and
+    synthesizes the whole line in one call instead (better prosody than two
+    stitched fragments), and separately flanks any run of 2+ ALL-CAPS words
+    with `say`'s `[[emph +]] ... [[emph -]]` (e.g. "Please NEVER DO THAT
+    AGAIN" -> "Please [[emph +]] NEVER DO THAT AGAIN [[emph -]]") — see
+    `_say_markup`. The manual backend ignores both: a human recording
+    narration reads the dots as a pause cue and the caps as emphasis
+    directly, and rewriting/splitting would desync `--tts manual`'s file
+    numbering with `export_script()`'s.
 
     Examples
     --------
@@ -1405,10 +1460,12 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
     if two_pass and typing:
         print("note: --typing has no effect in two-pass mode ('/' in a "
               "marker) — the writing pass always types the new code in.")
-    # '..' narration pause markers (see _synth_with_pauses) only apply to real
-    # speech backends — the manual backend must get exactly one synth() call
+    # '..' narration pause markers: "say" rewrites them to its own inline
+    # [[slnc N]] markup (one synth() call, natural prosody); other real
+    # speech backends split/stitch with a generated silence clip; the manual
+    # backend leaves text untouched — it must get exactly one synth() call
     # per beat, or its file numbering desyncs from --export-script's.
-    split_pauses = tts != "manual"
+    pause_mode = "none" if tts == "manual" else "say" if tts == "say" else "split"
 
     work = tempfile.mkdtemp(prefix="screencast_")
 
@@ -1420,7 +1477,7 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
                          subtitles=subtitles)
         audio_cache = {}
         clips = _render_two_pass(code_lines, beats1, beats2, cv, work, synth,
-                                 audio_cache, typing_speed, pause, split_pauses)
+                                 audio_cache, typing_speed, pause, pause_mode)
         concat(clips, out_path, work)
         shutil.rmtree(work, ignore_errors=True)
         print("done.")
@@ -1457,7 +1514,7 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
                        [beat.highlight] if beat.highlight else [],
                        beat.state, caption, os.path.join(work, f"hold_{k:03d}.png"))
         audio = _cached_synth(synth, audio_cache, beat.narration, work,
-                              f"{k:03d}", split_pauses)
+                              f"{k:03d}", pause_mode)
         nclip = os.path.join(work, f"clip_{k:03d}.mp4")
         make_clip(hold, audio, nclip)
         clips.append(nclip)

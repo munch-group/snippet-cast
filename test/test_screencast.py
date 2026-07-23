@@ -736,8 +736,8 @@ def test_synth_with_pauses_leading_and_trailing_markers(tmp_path):
     assert sc.probe_duration(audio) == pytest.approx(0.2 + 1.0, abs=0.05)
 
 
-def test_cached_synth_split_pauses_false_calls_synth_once(tmp_path):
-    """The manual backend (split_pauses=False) must get exactly one synth()
+def test_cached_synth_pause_mode_none_calls_synth_once_unmodified(tmp_path):
+    """The manual backend (pause_mode="none") must get exactly one synth()
     call per beat regardless of '..' markers — splitting would consume more
     than one numbered recording and desync --tts manual's file order."""
     calls = []
@@ -746,12 +746,12 @@ def test_cached_synth_split_pauses_false_calls_synth_once(tmp_path):
         calls.append(text)
         return f"{out}.wav"
 
-    sc._cached_synth(synth, {}, "Hello.. world", str(tmp_path), "001", split_pauses=False)
+    sc._cached_synth(synth, {}, "Hello.. world", str(tmp_path), "001", pause_mode="none")
     assert calls == ["Hello.. world"]
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="requires ffmpeg")
-def test_cached_synth_split_pauses_true_splits_on_marker(tmp_path):
+def test_cached_synth_pause_mode_split_splits_on_marker(tmp_path):
     calls = []
 
     def synth(text, out):
@@ -760,6 +760,46 @@ def test_cached_synth_split_pauses_true_splits_on_marker(tmp_path):
 
     sc._cached_synth(synth, {}, "Hello.. world", str(tmp_path), "001")
     assert calls == ["Hello", "world"]
+
+
+def test_cached_synth_pause_mode_say_rewrites_markup_in_one_call(tmp_path):
+    calls = []
+
+    def synth(text, out):
+        calls.append(text)
+        return f"{out}.wav"
+
+    sc._cached_synth(synth, {}, "Hello.. world", str(tmp_path), "001", pause_mode="say")
+    assert calls == ["Hello[[slnc 400]] world"]
+
+
+def test_say_emphasis_markup_flanks_all_caps_run():
+    assert (sc._say_emphasis_markup("Please NEVER DO THAT AGAIN")
+            == "Please [[emph +]] NEVER DO THAT AGAIN [[emph -]]")
+
+
+def test_say_emphasis_markup_flanks_single_all_caps_word():
+    assert sc._say_emphasis_markup("STOP now") == "[[emph +]] STOP [[emph -]] now"
+
+
+def test_say_emphasis_markup_ignores_mixed_case_word():
+    text = "The IDentifier stays untouched"
+    assert sc._say_emphasis_markup(text) == text  # no partial "ID" match
+
+
+def test_say_emphasis_markup_ignores_lone_single_letter():
+    text = "I am here"
+    assert sc._say_emphasis_markup(text) == text  # "I" alone doesn't count
+
+
+def test_say_emphasis_markup_noop_without_all_caps():
+    text = "Nothing shouted here."
+    assert sc._say_emphasis_markup(text) == text
+
+
+def test_say_markup_combines_pause_and_emphasis():
+    assert (sc._say_markup("Wait.. NEVER DO THAT")
+            == "Wait[[slnc 400]] [[emph +]] NEVER DO THAT [[emph -]]")
 
 
 @pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
