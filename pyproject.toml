@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "snippet-cast"
-version = "0.1.45"
+version = "0.1.46"
 description = "Turn annotated Python snippets into narrated screencast videos."
 authors = [
     {name = "Kasper Munch", email = "kaspermunch@birc.au.dk"}
@@ -18,7 +18,7 @@ classifiers = [
 ]
 dependencies = [
     "pillow",
-    "pygments", "piper-tts>=1.5.0,<2",
+    "pygments",
 ]
 
 [project.urls]
