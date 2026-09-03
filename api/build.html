@@ -81,7 +81,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../site_libs/quarto-html/quarto-syntax-highlighting-64a204ab8560d761af7679ceaba22944.css" rel="stylesheet" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap-6ac2aec46ad7f46b16024ee4409aa65c.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-3e9b1289f5f353c49b617ce48ad2bc38.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -202,6 +202,8 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <li><a href="#snippet_cast.screencast.build" id="toc-snippet_cast.screencast.build" class="nav-link active" data-scroll-target="#snippet_cast.screencast.build">build</a>
   <ul class="collapse">
   <li><a href="#parameters" id="toc-parameters" class="nav-link" data-scroll-target="#parameters">Parameters</a></li>
+  <li><a href="#narration-split-into-two-passes" id="toc-narration-split-into-two-passes" class="nav-link" data-scroll-target="#narration-split-into-two-passes">Narration split into two passes</a></li>
+  <li><a href="#inline-pauses-and-for-say-emphasis-within-a-narration-line" id="toc-inline-pauses-and-for-say-emphasis-within-a-narration-line" class="nav-link" data-scroll-target="#inline-pauses-and-for-say-emphasis-within-a-narration-line">Inline pauses (and, for <code>say</code>, emphasis) within a narration line</a></li>
   <li><a href="#examples" id="toc-examples" class="nav-link" data-scroll-target="#examples">Examples</a></li>
   <li><a href="#see-also" id="toc-see-also" class="nav-link" data-scroll-target="#see-also">See Also</a></li>
   </ul></li>
@@ -224,7 +226,15 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>    every<span class="op">=</span><span class="va">False</span>,</span>
 <span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>    subtitles<span class="op">=</span><span class="va">False</span>,</span>
 <span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>    typing<span class="op">=</span><span class="va">False</span>,</span>
-<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>    typing_speed<span class="op">=</span>TYPE_SPEED,</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>    pause<span class="op">=</span>PAUSE_DEFAULT,</span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>    manual_audio_dir<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>    style<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a>    bg_color<span class="op">=</span>_USE_DEFAULT,</span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a>    state_bg_color<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a>    state_fg_color<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a>    highlight_color<span class="op">=</span>_USE_DEFAULT,</span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <p>Render an annotated Python snippet into a narrated screencast video.</p>
 <p>Parses <code>source_path</code> for trailing <code>#:</code> narration comments, optionally executes it to capture a per-line variable state, and assembles one still-frame-plus-narration clip per beat into <code>out_path</code> with ffmpeg.</p>
 <section id="parameters" class="level2 doc-section doc-section-parameters">
@@ -240,7 +250,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </dd>
 <dt><code><span class="parameter-name"><strong>tts</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span></code></dt>
 <dd>
-<p>Name of a registered TTS backend (a key of <code>BACKENDS</code>): one of <code>"say"</code>, <code>"silent"</code>, <code>"piper"</code>, <code>"elevenlabs"</code>.</p>
+<p>Name of a registered TTS backend (a key of <code>BACKENDS</code>): one of <code>"say"</code>, <code>"silent"</code>, <code>"piper"</code>, <code>"elevenlabs"</code>, <code>"manual"</code>.</p>
 </dd>
 <dt><code><span class="parameter-name"><strong>trace</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">True</span></code></dt>
 <dd>
@@ -248,7 +258,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </dd>
 <dt><code><span class="parameter-name"><strong>every</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">False</span></code></dt>
 <dd>
-<p>Emit one beat per <em>execution</em> of a marked line (animates loops iteration by iteration) instead of one beat per marked line.</p>
+<p>Emit one beat per <em>execution</em> of a marked line (animates loops iteration by iteration) instead of one beat per marked line. Not supported together with two-pass narration (a <code>/</code> in some marker).</p>
 </dd>
 <dt><code><span class="parameter-name"><strong>subtitles</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">False</span></code></dt>
 <dd>
@@ -256,9 +266,49 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </dd>
 <dt><code><span class="parameter-name"><strong>typing</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">False</span></code></dt>
 <dd>
-<p>Type newly revealed lines character-by-character (first-execution mode only; has no effect when <code>every=True</code>).</p>
+<p>Type newly revealed lines character-by-character (first-execution mode only; has no effect when <code>every=True</code>, and no effect in two-pass mode — the writing pass always types).</p>
+</dd>
+<dt><code><span class="parameter-name"><strong>typing_speed</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">TYPE_SPEED</span></code></dt>
+<dd>
+<p>Seconds to reveal each newly typed character when <code>typing=True</code>, or when the writing pass has no narration to time itself to [default: <code>TYPE_SPEED</code>]. Larger is slower.</p>
+</dd>
+<dt><code><span class="parameter-name"><strong>pause</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">PAUSE_DEFAULT</span></code></dt>
+<dd>
+<p>Seconds of silence to hold on each beat’s frame after its narration finishes, before the next beat begins [default: <code>PAUSE_DEFAULT</code>]. <code>0</code> cuts directly from one beat’s narration to the next. In two-pass mode it applies within both passes and at the seam between them (the writing pass holds its finished code for <code>pause</code> seconds before the walkthrough starts). Never appended after the video’s final beat.</p>
+</dd>
+<dt><code><span class="parameter-name"><strong>manual_audio_dir</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">None</span></code></dt>
+<dd>
+<p>Directory of pre-recorded audio files for <code>tts="manual"</code>, named 001.wav, 002.wav, … (or .mp3/.m4a/.aiff/.flac/.ogg) matching <code>export_script()</code>’s numbering.</p>
+</dd>
+<dt><code><span class="parameter-name"><strong>style</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">None</span></code></dt>
+<dd>
+<p>Syntax highlighting theme for this render: a registered pygments style name, a <code>BUILTIN_STYLES</code> key (<code>"dark-modern"</code>/<code>"light-modern"</code>), a path to a KSyntaxHighlighting/Pandoc <code>.theme</code> file (see <code>load_theme()</code>), or a <code>pygments.style.Style</code> subclass. <code>None</code> uses the <code>STYLE</code> global.</p>
+</dd>
+<dt><code><span class="parameter-name"><strong>highlight_color</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">_USE_DEFAULT</span></code></dt>
+<dd>
+<p><code>"#rrggbb"</code> band behind the highlighted code line, overriding the style’s own <code>highlight_color</code>. <code>None</code> uses the style’s; omit the argument to use the <code>HIGHLIGHT_COLOR</code> global. Worth setting for a style that declares none — pygments’ unset default is a pale <code>#ffffcc</code> (<code>DarkModernStyle</code>/<code>LightModernStyle</code> are both in that boat); a style loaded from a <code>.theme</code> file gets one derived instead.</p>
+</dd>
+<dt><code><span class="parameter-name"><strong>state_bg_color</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">None</span></code></dt>
+<dd>
+<p><code>"#rrggbb"</code> background for the state panel, overriding <code>PANEL_BG</code>. <code>None</code> keeps it.</p>
+</dd>
+<dt><code><span class="parameter-name"><strong>state_fg_color</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">None</span></code></dt>
+<dd>
+<p><code>"#rrggbb"</code> for ALL of the state panel’s text — variable names and values both — with the “STATE” header blended <code>HEADER_DIM</code> toward the panel background so it stays subordinate. <code>None</code> keeps the default three-color scheme (<code>COL_NAME</code>/<code>COL_VALUE</code>/<code>COL_HEADER</code>), which is also where to go for finer control than one color gives.</p>
+</dd>
+<dt><code><span class="parameter-name"><strong>bg_color</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">_USE_DEFAULT</span></code></dt>
+<dd>
+<p><code>"#rrggbb"</code> background behind both the code and the canvas, overriding whatever background <code>style</code> declares (its syntax colors are left alone — pairing a dark background with a light style is on you). <code>None</code> means no override, i.e.&nbsp;the style’s own background; omit the argument entirely to use the <code>BG_COLOR</code> global. Caption and rule colors adapt to whichever background wins, via <code>_is_light()</code>.</p>
 </dd>
 </dl>
+</section>
+<section id="narration-split-into-two-passes" class="level2 doc-section doc-section-narration-split-into-two-passes">
+<h2 class="doc-section doc-section-narration-split-into-two-passes anchored" data-anchor-id="narration-split-into-two-passes">Narration split into two passes</h2>
+<p>A <code>#:</code> narration containing a <code>/</code> is split into “writing pass / walkthrough pass” text (see <code>split_narration</code>). If ANY marker in the file uses <code>/</code>, the whole video becomes two full, sequential passes: first the entire snippet is typed in (narrated by each line’s part before <code>/</code>, no state panel, no highlight), then the existing walkthrough plays again from the top (narrated by the text after <code>/</code>, exactly today’s single-pass mechanics). A file with no <code>/</code> anywhere renders exactly as before.</p>
+</section>
+<section id="inline-pauses-and-for-say-emphasis-within-a-narration-line" class="level2 doc-section doc-section-inline-pauses-and-for-say-emphasis-within-a-narration-line">
+<h2 class="doc-section doc-section-inline-pauses-and-for-say-emphasis-within-a-narration-line anchored" data-anchor-id="inline-pauses-and-for-say-emphasis-within-a-narration-line">Inline pauses (and, for <code>say</code>, emphasis) within a narration line</h2>
+<p>A run of 2+ consecutive periods inside a <code>#:</code> narration (“..” , “….”, …) inserts a pause mid-line instead of being spoken: <code>PAUSE_PER_PERIOD</code> seconds of silence per period (“..” -&gt; 0.2s, “….” -&gt; 0.4s), with the text on either side synthesized separately and stitched together (see <code>_synth_with_pauses</code>). A single period is ordinary end-of-sentence punctuation and is untouched. <code>tts="say"</code> handles this differently — it rewrites the run in place to <code>say</code>’s own <code>[[slnc N]]</code> pause markup and synthesizes the whole line in one call instead (better prosody than two stitched fragments), and separately flanks any run of 2+ ALL-CAPS words with <code>say</code>’s <code>[[emph +]] ... [[emph -]]</code> (e.g.&nbsp;“Please NEVER DO THAT AGAIN” -&gt; “Please [[emph +]] NEVER DO THAT AGAIN [[emph -]]”) — see <code>_say_markup</code>. The manual backend ignores both: a human recording narration reads the dots as a pause cue and the caps as emphasis directly, and rewriting/splitting would desync <code>--tts manual</code>’s file numbering with <code>export_script()</code>’s.</p>
 </section>
 <section id="examples" class="level2 doc-section doc-section-examples">
 <h2 class="doc-section doc-section-examples anchored" data-anchor-id="examples">Examples</h2>
@@ -268,7 +318,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="see-also" class="level2 doc-section doc-section-see-also">
 <h2 class="doc-section doc-section-see-also anchored" data-anchor-id="see-also">See Also</h2>
-<p><code>snippet_cast.screencast.main</code></p>
+<p><code>snippet_cast.screencast.main</code> <code>snippet_cast.screencast.export_script</code></p>
 
 
 </section>

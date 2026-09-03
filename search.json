@@ -1,76 +1,5 @@
 [
   {
-    "objectID": "pages/snippet-cast.html",
-    "href": "pages/snippet-cast.html",
-    "title": "snippet-cast",
-    "section": "",
-    "text": "import os\n\nimport snippet_cast.magic\n\n# os.environ['PIPER_MODEL'] = './en_US-lessac-medium.onnx'   # … or a local .onnx path\n# os.environ['PIPER_LENGTH_SCALE'] = '1.5'             # speaking rate: &gt;1 slower, &lt;1 faster\n# os.environ['PIPER_DATA_DIR'] = '/home/kmt/bioinformatics'      # where you downloaded voices to (must match --download-dir above)\n# #os.environ['PIPER_BIN'] = /opt/piper/piper         # if the binary isn't just \"piper\"\n\n\nos.environ['SNIPPET_CAST_PAUSE'] = '0.6'\nos.environ['SNIPPET_CAST_TYPING_SPEED'] = '0.1'\nos.environ['SNIPPET_CAST_OUTPUT_DIR'] = './videos'\n\nos.environ['SNIPPET_CAST_TTS'] = 'say'\nos.environ['SNIPPET_CAST_RECORD'] = '0'\n# os.environ['SNIPPET_CAST_TTS'] = 'manual'\n# os.environ['SNIPPET_CAST_MANUAL_AUDIO_DIR'] = './manual_audio'\n# os.environ['SNIPPET_CAST_RECORD'] = '1'\n\n# os.environ['SNIPPET_CAST_SUBTITLES'] = '1'\n\n\n#%%snippet-cast --tts say --pause 0.6 --typing-speed 0.1 --subtitles -o out.mp4 \n\n\n%%snippet-cast -n hello --tts say\nprint(\"hello world\") #:  \"print\" prints the string\nprint(\"hi kasper\") #: \"print\" prints the other string\n\nhello world\nhi kasper\n2 beats -&gt; ./videos/hello.mp4  (backend: say, trace: on, first-exec)\n  [1/2] \"print\" prints the string\n  [2/2] \"print\" prints the other string\ndone.\n\n\n\n      Your browser does not support the video element.\n    \n\n\n\n%%snippet-cast --tts say --pause 2 --typing-speed 2\nprint(\"hello world\") #:  \"print\" prints the string\nprint(\"hi kasper\") #: \"print\" prints the other string\n\n\n%%snippet-cast --tts say --pause 2 --typing-speed 2\nprint(\"hello world\") #: let's make our first program / \"print\" prints the string\nprint(\"hi kasper\") #: let's do another one / \"print\" prints the other string\n\n\n%%snippet-cast --tts manual --record -n forl\n#%%snippet-cast --tts say -n forl\n#: 1) Lets compute the Fibonacci numbers / Let's trace an iterative Fibonacci function as it runs.\ndef fib(n):             #: 3) Now define the function. / The first line names the fib-function and defines its parameters.\n    a, b = 0, 1         #: 4) \"a\" and \"b\" are our first two Fibonacci numbers / Start from the first two Fibonacci numbers, zero and one.\n    for _ in range(n):  #: 5) / Loop n times;`` the counter itself is unused.\n        a, b = b, a + b #: 6) / Advance the pair — b becomes the running sum.\n    return a            #: 7) / After the loop, a holds the nth Fibonacci number.\n\nresult = fib(7)         #: 2) We call our function \"fib\" and make it take a single argument / Call fib with seven; result becomes thirteen.\n\n\nfrom IPython.display import Video\nVideo('out.mp4')\n\n\n%%snippet-cast --tts piper --pause 0.6 --typing-speed 0.1 -o out.mp4 \n\n#: 0) Let's write a Fibonacci function / Let's trace an function as it runs.\ndef fib(n):             #: 2) / The first line names the fib-function and defines its parameters - in this case a single one named n. The first line ends with a colon and the code that runs when the function is called is what is indented on the lines below. \n    a, b = 0, 1         #: 3) / Start from the first two Fibonacci numbers, zero and one.\n    for _ in range(n):  #: 4) / Loop n times; the counter itself is unused.\n        a, b = b, a + b #: 5) / Advance the pair — b becomes the running sum.\n    return a            #: 6) / After the loop, a holds the nth Fibonacci number.\nresult = fib(7)         #: 1) / Call fib with seven; result becomes thirteen.\n\n\n\nsnippet-cast tmp.py -o out.mp4 --typing --tts piper --piper-model ~/piper-voices/en_US-lessac-medium.onnx --piper-length-scale 1.5 --piper-data-dir ~/piper-voices --pause 0.6 --typing-speed 0.1 --every"
-  },
-  {
-    "objectID": "api/index.html",
-    "href": "api/index.html",
-    "title": "Function reference",
-    "section": "",
-    "text": "Programmatic interface for turning an annotated Python snippet into a narrated screencast video.\n\n\n\nbuild\nRender an annotated Python snippet into a narrated screencast video.",
-    "crumbs": [
-      "Function reference"
-    ]
-  },
-  {
-    "objectID": "api/index.html#screencast-api",
-    "href": "api/index.html#screencast-api",
-    "title": "Function reference",
-    "section": "",
-    "text": "Programmatic interface for turning an annotated Python snippet into a narrated screencast video.\n\n\n\nbuild\nRender an annotated Python snippet into a narrated screencast video.",
-    "crumbs": [
-      "Function reference"
-    ]
-  },
-  {
-    "objectID": "api/build.html",
-    "href": "api/build.html",
-    "title": "build",
-    "section": "",
-    "text": "snippet_cast.screencast.build(\n    source_path,\n    out_path,\n    tts,\n    trace=True,\n    every=False,\n    subtitles=False,\n    typing=False,\n)\nRender an annotated Python snippet into a narrated screencast video.\nParses source_path for trailing #: narration comments, optionally executes it to capture a per-line variable state, and assembles one still-frame-plus-narration clip per beat into out_path with ffmpeg.\n\n\n\nsource_path : \n\nPath to the annotated, still-valid Python snippet to narrate.\n\nout_path : \n\nPath the assembled MP4 is written to.\n\ntts : \n\nName of a registered TTS backend (a key of BACKENDS): one of \"say\", \"silent\", \"piper\", \"elevenlabs\".\n\ntrace :  = True\n\nExecute the snippet under sys.settrace to capture the state panel. Required for every=True.\n\nevery :  = False\n\nEmit one beat per execution of a marked line (animates loops iteration by iteration) instead of one beat per marked line.\n\nsubtitles :  = False\n\nBurn the narration text onto each frame as a caption.\n\ntyping :  = False\n\nType newly revealed lines character-by-character (first-execution mode only; has no effect when every=True).\n\n\n\n\n\nfrom snippet_cast import build\n\nbuild(\"fib.py\", \"out.mp4\", tts=\"silent\", subtitles=True)\n\n\n\nsnippet_cast.screencast.main",
-    "crumbs": [
-      "Screencast API",
-      "build"
-    ]
-  },
-  {
-    "objectID": "api/build.html#parameters",
-    "href": "api/build.html#parameters",
-    "title": "build",
-    "section": "",
-    "text": "source_path : \n\nPath to the annotated, still-valid Python snippet to narrate.\n\nout_path : \n\nPath the assembled MP4 is written to.\n\ntts : \n\nName of a registered TTS backend (a key of BACKENDS): one of \"say\", \"silent\", \"piper\", \"elevenlabs\".\n\ntrace :  = True\n\nExecute the snippet under sys.settrace to capture the state panel. Required for every=True.\n\nevery :  = False\n\nEmit one beat per execution of a marked line (animates loops iteration by iteration) instead of one beat per marked line.\n\nsubtitles :  = False\n\nBurn the narration text onto each frame as a caption.\n\ntyping :  = False\n\nType newly revealed lines character-by-character (first-execution mode only; has no effect when every=True).",
-    "crumbs": [
-      "Screencast API",
-      "build"
-    ]
-  },
-  {
-    "objectID": "api/build.html#examples",
-    "href": "api/build.html#examples",
-    "title": "build",
-    "section": "",
-    "text": "from snippet_cast import build\n\nbuild(\"fib.py\", \"out.mp4\", tts=\"silent\", subtitles=True)",
-    "crumbs": [
-      "Screencast API",
-      "build"
-    ]
-  },
-  {
-    "objectID": "api/build.html#see-also",
-    "href": "api/build.html#see-also",
-    "title": "build",
-    "section": "",
-    "text": "snippet_cast.screencast.main",
-    "crumbs": [
-      "Screencast API",
-      "build"
-    ]
-  },
-  {
     "objectID": "pages/overview.html",
     "href": "pages/overview.html",
     "title": "Overview",
@@ -129,5 +58,98 @@
     "crumbs": [
       "Overview"
     ]
+  },
+  {
+    "objectID": "api/build.html",
+    "href": "api/build.html",
+    "title": "build",
+    "section": "",
+    "text": "snippet_cast.screencast.build(\n    source_path,\n    out_path,\n    tts,\n    trace=True,\n    every=False,\n    subtitles=False,\n    typing=False,\n    typing_speed=TYPE_SPEED,\n    pause=PAUSE_DEFAULT,\n    manual_audio_dir=None,\n    style=None,\n    bg_color=_USE_DEFAULT,\n    state_bg_color=None,\n    state_fg_color=None,\n    highlight_color=_USE_DEFAULT,\n)\nRender an annotated Python snippet into a narrated screencast video.\nParses source_path for trailing #: narration comments, optionally executes it to capture a per-line variable state, and assembles one still-frame-plus-narration clip per beat into out_path with ffmpeg.\n\n\n\nsource_path : \n\nPath to the annotated, still-valid Python snippet to narrate.\n\nout_path : \n\nPath the assembled MP4 is written to.\n\ntts : \n\nName of a registered TTS backend (a key of BACKENDS): one of \"say\", \"silent\", \"piper\", \"elevenlabs\", \"manual\".\n\ntrace :  = True\n\nExecute the snippet under sys.settrace to capture the state panel. Required for every=True.\n\nevery :  = False\n\nEmit one beat per execution of a marked line (animates loops iteration by iteration) instead of one beat per marked line. Not supported together with two-pass narration (a / in some marker).\n\nsubtitles :  = False\n\nBurn the narration text onto each frame as a caption.\n\ntyping :  = False\n\nType newly revealed lines character-by-character (first-execution mode only; has no effect when every=True, and no effect in two-pass mode — the writing pass always types).\n\ntyping_speed :  = TYPE_SPEED\n\nSeconds to reveal each newly typed character when typing=True, or when the writing pass has no narration to time itself to [default: TYPE_SPEED]. Larger is slower.\n\npause :  = PAUSE_DEFAULT\n\nSeconds of silence to hold on each beat’s frame after its narration finishes, before the next beat begins [default: PAUSE_DEFAULT]. 0 cuts directly from one beat’s narration to the next. In two-pass mode it applies within both passes and at the seam between them (the writing pass holds its finished code for pause seconds before the walkthrough starts). Never appended after the video’s final beat.\n\nmanual_audio_dir :  = None\n\nDirectory of pre-recorded audio files for tts=\"manual\", named 001.wav, 002.wav, … (or .mp3/.m4a/.aiff/.flac/.ogg) matching export_script()’s numbering.\n\nstyle :  = None\n\nSyntax highlighting theme for this render: a registered pygments style name, a BUILTIN_STYLES key (\"dark-modern\"/\"light-modern\"), a path to a KSyntaxHighlighting/Pandoc .theme file (see load_theme()), or a pygments.style.Style subclass. None uses the STYLE global.\n\nhighlight_color :  = _USE_DEFAULT\n\n\"#rrggbb\" band behind the highlighted code line, overriding the style’s own highlight_color. None uses the style’s; omit the argument to use the HIGHLIGHT_COLOR global. Worth setting for a style that declares none — pygments’ unset default is a pale #ffffcc (DarkModernStyle/LightModernStyle are both in that boat); a style loaded from a .theme file gets one derived instead.\n\nstate_bg_color :  = None\n\n\"#rrggbb\" background for the state panel, overriding PANEL_BG. None keeps it.\n\nstate_fg_color :  = None\n\n\"#rrggbb\" for ALL of the state panel’s text — variable names and values both — with the “STATE” header blended HEADER_DIM toward the panel background so it stays subordinate. None keeps the default three-color scheme (COL_NAME/COL_VALUE/COL_HEADER), which is also where to go for finer control than one color gives.\n\nbg_color :  = _USE_DEFAULT\n\n\"#rrggbb\" background behind both the code and the canvas, overriding whatever background style declares (its syntax colors are left alone — pairing a dark background with a light style is on you). None means no override, i.e. the style’s own background; omit the argument entirely to use the BG_COLOR global. Caption and rule colors adapt to whichever background wins, via _is_light().\n\n\n\n\n\nA #: narration containing a / is split into “writing pass / walkthrough pass” text (see split_narration). If ANY marker in the file uses /, the whole video becomes two full, sequential passes: first the entire snippet is typed in (narrated by each line’s part before /, no state panel, no highlight), then the existing walkthrough plays again from the top (narrated by the text after /, exactly today’s single-pass mechanics). A file with no / anywhere renders exactly as before.\n\n\n\nA run of 2+ consecutive periods inside a #: narration (“..” , “….”, …) inserts a pause mid-line instead of being spoken: PAUSE_PER_PERIOD seconds of silence per period (“..” -&gt; 0.2s, “….” -&gt; 0.4s), with the text on either side synthesized separately and stitched together (see _synth_with_pauses). A single period is ordinary end-of-sentence punctuation and is untouched. tts=\"say\" handles this differently — it rewrites the run in place to say’s own [[slnc N]] pause markup and synthesizes the whole line in one call instead (better prosody than two stitched fragments), and separately flanks any run of 2+ ALL-CAPS words with say’s [[emph +]] ... [[emph -]] (e.g. “Please NEVER DO THAT AGAIN” -&gt; “Please [[emph +]] NEVER DO THAT AGAIN [[emph -]]”) — see _say_markup. The manual backend ignores both: a human recording narration reads the dots as a pause cue and the caps as emphasis directly, and rewriting/splitting would desync --tts manual’s file numbering with export_script()’s.\n\n\n\nfrom snippet_cast import build\n\nbuild(\"fib.py\", \"out.mp4\", tts=\"silent\", subtitles=True)\n\n\n\nsnippet_cast.screencast.main snippet_cast.screencast.export_script",
+    "crumbs": [
+      "Screencast API",
+      "build"
+    ]
+  },
+  {
+    "objectID": "api/build.html#parameters",
+    "href": "api/build.html#parameters",
+    "title": "build",
+    "section": "",
+    "text": "source_path : \n\nPath to the annotated, still-valid Python snippet to narrate.\n\nout_path : \n\nPath the assembled MP4 is written to.\n\ntts : \n\nName of a registered TTS backend (a key of BACKENDS): one of \"say\", \"silent\", \"piper\", \"elevenlabs\", \"manual\".\n\ntrace :  = True\n\nExecute the snippet under sys.settrace to capture the state panel. Required for every=True.\n\nevery :  = False\n\nEmit one beat per execution of a marked line (animates loops iteration by iteration) instead of one beat per marked line. Not supported together with two-pass narration (a / in some marker).\n\nsubtitles :  = False\n\nBurn the narration text onto each frame as a caption.\n\ntyping :  = False\n\nType newly revealed lines character-by-character (first-execution mode only; has no effect when every=True, and no effect in two-pass mode — the writing pass always types).\n\ntyping_speed :  = TYPE_SPEED\n\nSeconds to reveal each newly typed character when typing=True, or when the writing pass has no narration to time itself to [default: TYPE_SPEED]. Larger is slower.\n\npause :  = PAUSE_DEFAULT\n\nSeconds of silence to hold on each beat’s frame after its narration finishes, before the next beat begins [default: PAUSE_DEFAULT]. 0 cuts directly from one beat’s narration to the next. In two-pass mode it applies within both passes and at the seam between them (the writing pass holds its finished code for pause seconds before the walkthrough starts). Never appended after the video’s final beat.\n\nmanual_audio_dir :  = None\n\nDirectory of pre-recorded audio files for tts=\"manual\", named 001.wav, 002.wav, … (or .mp3/.m4a/.aiff/.flac/.ogg) matching export_script()’s numbering.\n\nstyle :  = None\n\nSyntax highlighting theme for this render: a registered pygments style name, a BUILTIN_STYLES key (\"dark-modern\"/\"light-modern\"), a path to a KSyntaxHighlighting/Pandoc .theme file (see load_theme()), or a pygments.style.Style subclass. None uses the STYLE global.\n\nhighlight_color :  = _USE_DEFAULT\n\n\"#rrggbb\" band behind the highlighted code line, overriding the style’s own highlight_color. None uses the style’s; omit the argument to use the HIGHLIGHT_COLOR global. Worth setting for a style that declares none — pygments’ unset default is a pale #ffffcc (DarkModernStyle/LightModernStyle are both in that boat); a style loaded from a .theme file gets one derived instead.\n\nstate_bg_color :  = None\n\n\"#rrggbb\" background for the state panel, overriding PANEL_BG. None keeps it.\n\nstate_fg_color :  = None\n\n\"#rrggbb\" for ALL of the state panel’s text — variable names and values both — with the “STATE” header blended HEADER_DIM toward the panel background so it stays subordinate. None keeps the default three-color scheme (COL_NAME/COL_VALUE/COL_HEADER), which is also where to go for finer control than one color gives.\n\nbg_color :  = _USE_DEFAULT\n\n\"#rrggbb\" background behind both the code and the canvas, overriding whatever background style declares (its syntax colors are left alone — pairing a dark background with a light style is on you). None means no override, i.e. the style’s own background; omit the argument entirely to use the BG_COLOR global. Caption and rule colors adapt to whichever background wins, via _is_light().",
+    "crumbs": [
+      "Screencast API",
+      "build"
+    ]
+  },
+  {
+    "objectID": "api/build.html#narration-split-into-two-passes",
+    "href": "api/build.html#narration-split-into-two-passes",
+    "title": "build",
+    "section": "",
+    "text": "A #: narration containing a / is split into “writing pass / walkthrough pass” text (see split_narration). If ANY marker in the file uses /, the whole video becomes two full, sequential passes: first the entire snippet is typed in (narrated by each line’s part before /, no state panel, no highlight), then the existing walkthrough plays again from the top (narrated by the text after /, exactly today’s single-pass mechanics). A file with no / anywhere renders exactly as before.",
+    "crumbs": [
+      "Screencast API",
+      "build"
+    ]
+  },
+  {
+    "objectID": "api/build.html#inline-pauses-and-for-say-emphasis-within-a-narration-line",
+    "href": "api/build.html#inline-pauses-and-for-say-emphasis-within-a-narration-line",
+    "title": "build",
+    "section": "",
+    "text": "A run of 2+ consecutive periods inside a #: narration (“..” , “….”, …) inserts a pause mid-line instead of being spoken: PAUSE_PER_PERIOD seconds of silence per period (“..” -&gt; 0.2s, “….” -&gt; 0.4s), with the text on either side synthesized separately and stitched together (see _synth_with_pauses). A single period is ordinary end-of-sentence punctuation and is untouched. tts=\"say\" handles this differently — it rewrites the run in place to say’s own [[slnc N]] pause markup and synthesizes the whole line in one call instead (better prosody than two stitched fragments), and separately flanks any run of 2+ ALL-CAPS words with say’s [[emph +]] ... [[emph -]] (e.g. “Please NEVER DO THAT AGAIN” -&gt; “Please [[emph +]] NEVER DO THAT AGAIN [[emph -]]”) — see _say_markup. The manual backend ignores both: a human recording narration reads the dots as a pause cue and the caps as emphasis directly, and rewriting/splitting would desync --tts manual’s file numbering with export_script()’s.",
+    "crumbs": [
+      "Screencast API",
+      "build"
+    ]
+  },
+  {
+    "objectID": "api/build.html#examples",
+    "href": "api/build.html#examples",
+    "title": "build",
+    "section": "",
+    "text": "from snippet_cast import build\n\nbuild(\"fib.py\", \"out.mp4\", tts=\"silent\", subtitles=True)",
+    "crumbs": [
+      "Screencast API",
+      "build"
+    ]
+  },
+  {
+    "objectID": "api/build.html#see-also",
+    "href": "api/build.html#see-also",
+    "title": "build",
+    "section": "",
+    "text": "snippet_cast.screencast.main snippet_cast.screencast.export_script",
+    "crumbs": [
+      "Screencast API",
+      "build"
+    ]
+  },
+  {
+    "objectID": "api/index.html",
+    "href": "api/index.html",
+    "title": "Function reference",
+    "section": "",
+    "text": "Programmatic interface for turning an annotated Python snippet into a narrated screencast video.\n\n\n\nbuild\nRender an annotated Python snippet into a narrated screencast video.",
+    "crumbs": [
+      "Function reference"
+    ]
+  },
+  {
+    "objectID": "api/index.html#screencast-api",
+    "href": "api/index.html#screencast-api",
+    "title": "Function reference",
+    "section": "",
+    "text": "Programmatic interface for turning an annotated Python snippet into a narrated screencast video.\n\n\n\nbuild\nRender an annotated Python snippet into a narrated screencast video.",
+    "crumbs": [
+      "Function reference"
+    ]
+  },
+  {
+    "objectID": "pages/snippet-cast.html",
+    "href": "pages/snippet-cast.html",
+    "title": "snippet-cast",
+    "section": "",
+    "text": "import os\n\nimport snippet_cast.magic\n\n# os.environ['PIPER_MODEL'] = './en_US-lessac-medium.onnx'   # … or a local .onnx path\n# os.environ['PIPER_LENGTH_SCALE'] = '1.5'             # speaking rate: &gt;1 slower, &lt;1 faster\n# os.environ['PIPER_DATA_DIR'] = '/home/kmt/bioinformatics'      # where you downloaded voices to (must match --download-dir above)\n# #os.environ['PIPER_BIN'] = /opt/piper/piper         # if the binary isn't just \"piper\"\n\n\nos.environ['SNIPPET_CAST_PAUSE'] = '0.6'\nos.environ['SNIPPET_CAST_TYPING_SPEED'] = '0.1'\nos.environ['SNIPPET_CAST_OUTPUT_DIR'] = './videos'\n\nos.environ['SNIPPET_CAST_TTS'] = 'say'\nos.environ['SNIPPET_CAST_RECORD'] = '0'\n# os.environ['SNIPPET_CAST_TTS'] = 'manual'\n# os.environ['SNIPPET_CAST_MANUAL_AUDIO_DIR'] = './manual_audio'\n# os.environ['SNIPPET_CAST_RECORD'] = '1'\n\n# os.environ['SNIPPET_CAST_SUBTITLES'] = '1'\n\n\n#%%snippet-cast --tts say --pause 0.6 --typing-speed 0.1 --subtitles -o out.mp4 \n\n┌─────────────────────────┬───────────────────────┬──────────────────────┐ │ │ before │ now │ ├─────────────────────────┼───────────────────────┼──────────────────────┤ │ STYLE │ “monokai” │ “numpy” (packaged) │ ├─────────────────────────┼───────────────────────┼──────────────────────┤ │ BG_COLOR │ “#1F1F1F” │ None → theme’s │ │ │ │ #F3F4F5 │ ├─────────────────────────┼───────────────────────┼──────────────────────┤ │ PANEL_BG │ #181818 │ #E8E9EA │ ├─────────────────────────┼───────────────────────┼──────────────────────┤ │ COL_NAME / COL_VALUE / │ green / off-white / │ #000080 / #000000 / │ │ COL_HEADER │ warm grey │ #6D6D6D │ └─────────────────────────┴───────────────────────┴──────────────────────┘\n\n%%snippet-cast -n hello --tts say \nprint(\"hello world\") #:  \"print\" prints the string\nprint(\"hi kasper\") #: \"print\" prints the other string\n\n\n%%snippet-cast --tts say --pause 2 --typing-speed 2\nprint(\"hello world\") #:  \"print\" prints the string\nprint(\"hi kasper\") #: \"print\" prints the other string\n\n\n%%snippet-cast --tts say --pause 2 --typing-speed 2\n#| fig-column: margin\nprint(\"hello world\") #: let's make our first program / \"print\" prints the string\nprint(\"hi kasper\") #: let's do another one / \"print\" prints the other string\n\n\n%%snippet-cast --tts say --pause 0.6 --typing-speed 0.1 -n fibster\n#: 0) Let's write a Fibonacci function / Now, let us trace the function as it runs.\ndef fib(n):             #: 2) \n    a, b = 0, 1         #: 3) / Start from the first two Fibonacci numbers, zero and one.\n    for _ in range(n):  #: 4) / Loop \"n\" times; the counter itself is unused.\n        a, b = b, a + b #: 5) / Advance the pair — \"b\" becomes the running sum.\n    return a            #: 6) / After the loop, a holds the nth Fibonacci number.\n\nassert fib(7) == 13    #: 1) \n\n#: 1) Always begin by writing a test of the function you want to create. That\n# has the added benefit of running your function so any print\n# statements you add as you develop it are executed, ensuring your\n# implementation works as expected. / Call the function with seven as\n# argument and that that it returns 13 - as it should. becomes\n# thirteen.\n\n#: 2) The first line \"names\" the \"fib\" function and defines its\n# parameters - in this case a single one named n. The \"n\" variable\n# can be used in the function body to refer to the value argument\n# passed to the function. The line ends with a colon to show that it\n# controls the lines indented statements below it. These are the\n# statements that are run when the function is called. / When the\n# function is called, the function parameter \"n\" captures the value\n# of the argument passed to the function - in this case \"seven\".\n\n14 beats (7 pass-1 + 7 pass-2) -&gt; ./videos/fibster.mp4  (backend: say, trace: on, two-pass)\n  [pass1 1/7] Let's write a Fibonacci function\n  [pass1 2/7] Always begin by writing a test of the function you want to c\n  [pass1 3/7] The first line \"names\" the \"fib\" function and defines its pa\n  [pass1 4/7] (silent)\n  [pass1 5/7] (silent)\n  [pass1 6/7] (silent)\n  [pass1 7/7] (silent)\n  [pass2 1/7] Now, let us trace the function as it runs.\n  [pass2 2/7] When the function is called, the function parameter \"n\" capt\n  [pass2 3/7] Start from the first two Fibonacci numbers, zero and one.\n  [pass2 4/7] Loop \"n\" times; the counter itself is unused.\n  [pass2 5/7] Advance the pair — \"b\" becomes the running sum.\n  [pass2 6/7] After the loop, a holds the nth Fibonacci number.\n  [pass2 7/7] Call the function with seven as argument and that that it re\ndone.\n\n\n\n      Your browser does not support the video element.\n    \n\n\n\n%%snippet-cast --tts manual --record -n forl\n#%%snippet-cast --tts say -n forl\n#: 1) Lets compute the Fibonacci numbers / Let's trace an iterative Fibonacci function as it runs.\ndef fib(n):             #: 3) Now, define the function. / The \"first\" line names the \"fib\" function and defines its parameters.\n    a, b = 0, 1         #: 4) \"a\" and \"b\" are our first two Fibonacci numbers / Start from the first two Fibonacci numbers, zero and one.\n    for _ in range(n):  #: 5) / Loop \"n\" times;`` the counter itself is unused.\n        a, b = b, a + b #: 6) / Advance the pair — \"b\" becomes the running sum.\n    return a            #: 7) / After the loop, \"a\" holds the nth Fibonacci number.\n\nresult = fib(7)         #: 2) We call our function \"fib\" and make it take a single argument / Call fib with seven; result becomes thirteen.\n\n\nfrom IPython.display import Video\nVideo('out.mp4')\n\n\n%%snippet-cast --tts piper --pause 0.6 --typing-speed 0.1 -o out.mp4 \n\n#: 0) Let's write a Fibonacci function / Let's trace an function as it runs.\ndef fib(n):             #: 2) / The first line names the fib-function and defines its parameters - in this case a single one named n. The first line ends with a colon and the code that runs when the function is called is what is indented on the lines below. \n    a, b = 0, 1         #: 3) / ... Start from the first two Fibonacci numbers, zero and one.\n    for _ in range(n):  #: 4) / ... Loop n times; the counter itself is unused.\n        a, b = b, a + b #: 5) / ... Advance the pair — b becomes the running sum.\n    return a            #: 6) / ... After the loop, a holds the nth Fibonacci number.\n\nresult = fib(7)         #: 1) / ... Call fib with seven; result becomes thirteen.\n\n\n\nsnippet-cast tmp.py -o out.mp4 --typing --tts piper --piper-model ~/piper-voices/en_US-lessac-medium.onnx --piper-length-scale 1.5 --piper-data-dir ~/piper-voices --pause 0.6 --typing-speed 0.1 --every"
   }
 ]
