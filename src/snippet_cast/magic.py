@@ -59,14 +59,23 @@ from IPython.display import HTML, Image, Video, clear_output, display
 
 from .screencast import (
     BACKENDS,
+    BG_COLOR,
+    BG_COLOR_NONE,
+    BUILTIN_STYLES,
+    BUILTIN_THEMES,
+    HIGHLIGHT_COLOR,
     MANUAL_AUDIO_DIR_DEFAULT,
+    PANEL_BG,
     PAUSE_DEFAULT,
+    STYLE,
     TYPE_SPEED,
     build,
     export_script,
     record_narration,
     resolve_env_defaults,
     resolve_output_path,
+    resolve_panel_args,
+    resolve_style_args,
 )
 
 
@@ -183,9 +192,31 @@ class SnippetCastMagics(Magics):
     @argument("--typing-speed", type=float, default=None, metavar="SECONDS",
               help=f"seconds to reveal each newly typed character "
                    f"[default: {TYPE_SPEED}; env: SNIPPET_CAST_TYPING_SPEED]")
+    @argument("--style", default=None, metavar="NAME",
+              help="syntax highlighting theme: a built-in name "
+                   f"({', '.join(sorted(BUILTIN_STYLES) + sorted(BUILTIN_THEMES))}), "
+                   "any pygments style name, or a path to a Pandoc/KDE .theme "
+                   f"file [default: {STYLE}; env: SNIPPET_CAST_STYLE]")
+    @argument("--bg-color", default=None, metavar="HEX",
+              help="background behind the code and canvas as '#rrggbb', overriding "
+                   f"the style's own; {BG_COLOR_NONE!r} uses the style's "
+                   f"[default: {BG_COLOR}; env: SNIPPET_CAST_BG_COLOR]")
+    @argument("--highlight-color", default=None, metavar="HEX",
+              help="band behind the highlighted code line as '#rrggbb', "
+                   f"overriding the style's own; {BG_COLOR_NONE!r} uses the "
+                   "style's [env: SNIPPET_CAST_HIGHLIGHT_COLOR]")
+    @argument("--state-bg-color", default=None, metavar="HEX",
+              help="background of the state panel as '#rrggbb'; "
+                   f"{BG_COLOR_NONE!r} keeps the default "
+                   f"[default: {PANEL_BG}; env: SNIPPET_CAST_STATE_BG_COLOR]")
+    @argument("--state-fg-color", default=None, metavar="HEX",
+              help="text in the state panel as '#rrggbb' — names and values "
+                   f"both, header dimmed to match; {BG_COLOR_NONE!r} keeps the "
+                   "default scheme [env: SNIPPET_CAST_STATE_FG_COLOR]")
     @argument("--pause", type=float, default=None, metavar="SECONDS",
               help="seconds of silence held on each beat's frame after its "
-                   f"narration [default: {PAUSE_DEFAULT}; env: SNIPPET_CAST_PAUSE]")
+                   "narration (in two-pass mode, also between the two passes) "
+                   f"[default: {PAUSE_DEFAULT}; env: SNIPPET_CAST_PAUSE]")
     @argument("--manual-audio-dir", default=None, metavar="DIR",
               help="directory of pre-recorded audio for --tts manual "
                    f"[default: {MANUAL_AUDIO_DIR_DEFAULT}; "
@@ -219,7 +250,18 @@ class SnippetCastMagics(Magics):
             args, tts="silent", no_trace=False, every=False, subtitles=False,
             typing=False, typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT, export_script=False,
             manual_audio_dir=MANUAL_AUDIO_DIR_DEFAULT, record=False, no_frame=False,
-            name="out", output_dir=".")
+            name="out", output_dir=".", style=STYLE,
+            bg_color=BG_COLOR if BG_COLOR else BG_COLOR_NONE,
+            state_bg_color=PANEL_BG, state_fg_color=None,
+            highlight_color=HIGHLIGHT_COLOR)
+        try:
+            args.style, args.bg_color, args.highlight_color = resolve_style_args(
+                args.style, args.bg_color, args.highlight_color)
+            args.state_bg_color, args.state_fg_color = resolve_panel_args(
+                args.state_bg_color, args.state_fg_color)
+        except ValueError as e:
+            print(f"snippet-cast: {e}", file=sys.stderr)
+            return
         if args.tts not in BACKENDS:
             print(f"snippet-cast: --tts: invalid choice {args.tts!r} "
                   f"(choose from {', '.join(BACKENDS)})", file=sys.stderr)
@@ -262,7 +304,11 @@ class SnippetCastMagics(Magics):
                             trace=not args.no_trace, every=args.every,
                             subtitles=args.subtitles, typing=args.typing,
                             typing_speed=args.typing_speed, pause=args.pause,
-                            show_frame=not args.no_frame, frame_fn=view)
+                            show_frame=not args.no_frame, frame_fn=view,
+                            style=args.style, bg_color=args.bg_color,
+                            state_bg_color=args.state_bg_color,
+                            state_fg_color=args.state_fg_color,
+                            highlight_color=args.highlight_color)
                 except SystemExit as e:
                     print(f"snippet-cast: {e.code}", file=sys.stderr)
                     return
@@ -281,7 +327,11 @@ class SnippetCastMagics(Magics):
                       trace=not args.no_trace, every=args.every,
                       subtitles=args.subtitles, typing=args.typing,
                       typing_speed=args.typing_speed, pause=args.pause,
-                      manual_audio_dir=args.manual_audio_dir)
+                      manual_audio_dir=args.manual_audio_dir,
+                      style=args.style, bg_color=args.bg_color,
+                      state_bg_color=args.state_bg_color,
+                      state_fg_color=args.state_fg_color,
+                      highlight_color=args.highlight_color)
             except SystemExit as e:
                 print(f"snippet-cast: {e.code}", file=sys.stderr)
                 return

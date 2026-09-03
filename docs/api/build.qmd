@@ -9,6 +9,14 @@ snippet_cast.screencast.build(
     every=False,
     subtitles=False,
     typing=False,
+    typing_speed=TYPE_SPEED,
+    pause=PAUSE_DEFAULT,
+    manual_audio_dir=None,
+    style=None,
+    bg_color=_USE_DEFAULT,
+    state_bg_color=None,
+    state_fg_color=None,
+    highlight_color=_USE_DEFAULT,
 )
 ```
 
@@ -30,7 +38,7 @@ still-frame-plus-narration clip per beat into `out_path` with ffmpeg.
 
 <code>[**tts**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation}</code>
 
-:   Name of a registered TTS backend (a key of `BACKENDS`): one of `"say"`, `"silent"`, `"piper"`, `"elevenlabs"`.
+:   Name of a registered TTS backend (a key of `BACKENDS`): one of `"say"`, `"silent"`, `"piper"`, `"elevenlabs"`, `"manual"`.
 
 <code>[**trace**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [True]{.parameter-default}</code>
 
@@ -38,7 +46,7 @@ still-frame-plus-narration clip per beat into `out_path` with ffmpeg.
 
 <code>[**every**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [False]{.parameter-default}</code>
 
-:   Emit one beat per *execution* of a marked line (animates loops iteration by iteration) instead of one beat per marked line.
+:   Emit one beat per *execution* of a marked line (animates loops iteration by iteration) instead of one beat per marked line. Not supported together with two-pass narration (a `/` in some marker).
 
 <code>[**subtitles**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [False]{.parameter-default}</code>
 
@@ -46,7 +54,67 @@ still-frame-plus-narration clip per beat into `out_path` with ffmpeg.
 
 <code>[**typing**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [False]{.parameter-default}</code>
 
-:   Type newly revealed lines character-by-character (first-execution mode only; has no effect when `every=True`).
+:   Type newly revealed lines character-by-character (first-execution mode only; has no effect when `every=True`, and no effect in two-pass mode — the writing pass always types).
+
+<code>[**typing_speed**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [TYPE_SPEED]{.parameter-default}</code>
+
+:   Seconds to reveal each newly typed character when `typing=True`, or when the writing pass has no narration to time itself to [default: `TYPE_SPEED`]. Larger is slower.
+
+<code>[**pause**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [PAUSE_DEFAULT]{.parameter-default}</code>
+
+:   Seconds of silence to hold on each beat's frame after its narration finishes, before the next beat begins [default: `PAUSE_DEFAULT`]. `0` cuts directly from one beat's narration to the next. In two-pass mode it applies within both passes and at the seam between them (the writing pass holds its finished code for `pause` seconds before the walkthrough starts). Never appended after the video's final beat.
+
+<code>[**manual_audio_dir**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [None]{.parameter-default}</code>
+
+:   Directory of pre-recorded audio files for `tts="manual"`, named 001.wav, 002.wav, ... (or .mp3/.m4a/.aiff/.flac/.ogg) matching `export_script()`'s numbering.
+
+<code>[**style**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [None]{.parameter-default}</code>
+
+:   Syntax highlighting theme for this render: a registered pygments style name, a `BUILTIN_STYLES` key (`"dark-modern"`/`"light-modern"`), a path to a KSyntaxHighlighting/Pandoc `.theme` file (see `load_theme()`), or a `pygments.style.Style` subclass. `None` uses the `STYLE` global.
+
+<code>[**highlight_color**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [_USE_DEFAULT]{.parameter-default}</code>
+
+:   `"#rrggbb"` band behind the highlighted code line, overriding the style's own `highlight_color`. `None` uses the style's; omit the argument to use the `HIGHLIGHT_COLOR` global. Worth setting for a style that declares none — pygments' unset default is a pale `#ffffcc` (`DarkModernStyle`/`LightModernStyle` are both in that boat); a style loaded from a `.theme` file gets one derived instead.
+
+<code>[**state_bg_color**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [None]{.parameter-default}</code>
+
+:   `"#rrggbb"` background for the state panel, overriding `PANEL_BG`. `None` keeps it.
+
+<code>[**state_fg_color**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [None]{.parameter-default}</code>
+
+:   `"#rrggbb"` for ALL of the state panel's text — variable names and values both — with the "STATE" header blended `HEADER_DIM` toward the panel background so it stays subordinate. `None` keeps the default three-color scheme (`COL_NAME`/`COL_VALUE`/`COL_HEADER`), which is also where to go for finer control than one color gives.
+
+<code>[**bg_color**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [_USE_DEFAULT]{.parameter-default}</code>
+
+:   `"#rrggbb"` background behind both the code and the canvas, overriding whatever background `style` declares (its syntax colors are left alone — pairing a dark background with a light style is on you). `None` means no override, i.e. the style's own background; omit the argument entirely to use the `BG_COLOR` global. Caption and rule colors adapt to whichever background wins, via `_is_light()`.
+
+## Narration split into two passes {.doc-section .doc-section-narration-split-into-two-passes}
+
+A `#:` narration containing a `/` is split into "writing pass / walkthrough
+pass" text (see `split_narration`). If ANY marker in the file uses `/`,
+the whole video becomes two full, sequential passes: first the entire
+snippet is typed in (narrated by each line's part before `/`, no state
+panel, no highlight), then the existing walkthrough plays again from the
+top (narrated by the text after `/`, exactly today's single-pass
+mechanics). A file with no `/` anywhere renders exactly as before.
+
+## Inline pauses (and, for `say`, emphasis) within a narration line {.doc-section .doc-section-inline-pauses-and-for-say-emphasis-within-a-narration-line}
+
+A run of 2+ consecutive periods inside a `#:` narration (".." , "....",
+...) inserts a pause mid-line instead of being spoken: `PAUSE_PER_PERIOD`
+seconds of silence per period (".." -> 0.2s, "...." -> 0.4s), with the
+text on either side synthesized separately and stitched together (see
+`_synth_with_pauses`). A single period is ordinary end-of-sentence
+punctuation and is untouched. `tts="say"` handles this differently — it
+rewrites the run in place to `say`'s own `[[slnc N]]` pause markup and
+synthesizes the whole line in one call instead (better prosody than two
+stitched fragments), and separately flanks any run of 2+ ALL-CAPS words
+with `say`'s `[[emph +]] ... [[emph -]]` (e.g. "Please NEVER DO THAT
+AGAIN" -> "Please [[emph +]] NEVER DO THAT AGAIN [[emph -]]") — see
+`_say_markup`. The manual backend ignores both: a human recording
+narration reads the dots as a pause cue and the caps as emphasis
+directly, and rewriting/splitting would desync `--tts manual`'s file
+numbering with `export_script()`'s.
 
 ## Examples {.doc-section .doc-section-examples}
 
@@ -59,3 +127,4 @@ build("fib.py", "out.mp4", tts="silent", subtitles=True)
 ## See Also {.doc-section .doc-section-see-also}
 
 [](`snippet_cast.screencast.main`)
+[](`snippet_cast.screencast.export_script`)

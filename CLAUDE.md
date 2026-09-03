@@ -35,7 +35,16 @@ pixi run snippet-cast test/data/fib.py  -o out.mp4 --typing --subtitles      # f
 pixi run snippet-cast test/data/loop.py -o out.mp4 --every  --subtitles      # per-iteration walkthrough
 pixi run snippet-cast test/data/fib.py  -o out.mp4 --no-trace                # code + highlight only
 pixi run snippet-cast test/data/twopass.py -o out.mp4 --tts silent --subtitles   # two-pass ('/' in narration)
+pixi run snippet-cast test/data/footnote.py -o out.mp4 --tts silent --subtitles  # footnote bodies ('#: N)')
 pixi run snippet-cast test/data/twopass.py --export-script                      # narration script to record
+
+# theme / background (per run — no source edit needed)
+pixi run snippet-cast --style list                                              # every valid --style name
+pixi run snippet-cast test/data/fib.py -o out.mp4 --tts silent --style github-dark --bg-color none
+pixi run snippet-cast test/data/fib.py -o out.mp4 --tts silent --style light-modern --bg-color none
+pixi run snippet-cast test/data/fib.py -o out.mp4 --tts silent --style dark-modern --highlight-color '#2a2d2e'
+pixi run snippet-cast test/data/fib.py -o out.mp4 --tts silent --style data/numpy.theme --bg-color none
+SNIPPET_CAST_STYLE=nord pixi run snippet-cast test/data/fib.py -o out.mp4 --tts silent
 
 # real voices (see SETUP.md)
 pixi run snippet-cast test/data/fib.py  -o out.mp4 --tts piper
@@ -63,7 +72,7 @@ manual recipe used to sanity-check rendered video output.
 | `src/snippet_cast/__init__.py` | Public API: exports `build` (programmatic), `export_script`, `record_narration`, and `main` (CLI entry point). |
 | `src/snippet_cast/magic.py` | Jupyter `%%snippet-cast` cell magic (`pip install snippet-cast[jupyter]`; both `import snippet_cast` and `import snippet_cast.magic` auto-register it inside a live kernel, or use `%load_ext snippet_cast.magic`). `__init__.py` only imports it conditionally — behind the same `get_ipython()`-gated check `magic.py` itself uses — so `import snippet_cast` outside a live kernel, or without IPython installed, still never requires IPython. It's a thin wrapper: writes the cell to a temp `.py` file, calls `build()`/`export_script()`/`record_narration()`, displays the result with `IPython.display.Video`. `--record`'s `input()` prompts work the same in a notebook cell as a terminal — no special-casing needed. |
 | `SETUP.md` | How to configure every TTS backend (`say`, `manual`/`--record`, Piper, ElevenLabs). |
-| `test/data/fib.py`, `test/data/loop.py`, `test/data/twopass.py` | Sample annotated snippets used by tests and for manual verification (`twopass.py` exercises `/`-split, two-pass narration). |
+| `test/data/fib.py`, `test/data/loop.py`, `test/data/twopass.py`, `test/data/footnote.py` | Sample annotated snippets used by tests and for manual verification (`twopass.py` exercises `/`-split, two-pass narration; `footnote.py` exercises `#: N)` footnote bodies). |
 | `test/test_screencast.py` | Automated tests: parsing, tracing, beat construction, and a full-render smoke test. |
 | `*.mp4` | Generated outputs (not source; safe to delete / gitignore). |
 
@@ -138,10 +147,14 @@ duplicate frame files for the remainder (never truncating narration, per
 invariant 10); if `typing_speed` would need MORE time than the narration
 provides, the reveal is — same as before this fix — cut short by
 `make_typing_clip`'s `-shortest` at the real audio length. `--pause` applies
-**within both passes** (a duplicated prior bug: only pass 2's loop had pause
-logic at all) via the same "no trailing pause" guard (`k < len(beatsN) - 1`)
-in each pass independently — no pause is inserted at the pass-1-to-pass-2
-transition itself, nor after the video's final beat.
+**within both passes AND at the seam between them** (a duplicated prior bug:
+only pass 2's loop had pause logic at all) via the same "no trailing pause"
+guard (`k < len(beatsN) - 1`) in each pass independently, plus one explicit
+transition clip appended after pass 1's loop (held on the last pass-1 frame,
+i.e. the fully-typed code, so the walkthrough doesn't start talking the
+instant the writing pass stops). That in-loop guard is what keeps the seam
+gap the only clip in that seam — and what keeps a pause from ever landing
+after the video's final beat.
 
 #### Custom narration order (first-exec only, orthogonal to two-pass)
 
@@ -176,6 +189,53 @@ together with `--every` (there, beat order already follows the execution
 trace, not marker order, so reordering markers would have no effect on code
 beats and would silently desync the every-mode comment-slotting logic, which
 assumes `comment_marks` stays in ascending line order).
+
+#### Footnote narration (first-exec only, layered on the `N)` order prefix)
+
+A long narration can be moved out of the code's right margin by using the
+same `N)` label **twice**: once on the line it narrates, once on a
+comment-only block elsewhere holding the text (which may wrap over plain `#`
+lines). `resolve_footnotes(source)` — a **source -> source transform**, called
+at the very top of `_build_all_beats()` before `parse()`/`trace_run()`/
+`loop_body_ranges()` — unwraps the block's text into one line, **appends** it
+to the other occurrence's own text, and deletes the block.
+
+Doing it as a source rewrite is the whole trick: everything downstream
+re-derives its line numbers from the rewritten text, so removing lines needs
+no remapping of `Marker.line_no`, `Step.line_no` (which comes from tracing
+that same string) or `loop_body_ranges()`'s AST — and nothing else in the
+pipeline knows the feature exists. Doing it at the marker level instead would
+require renumbering all three in lockstep.
+
+`_scan_comments()`/`_marker_text()` are factored out of `parse()` and shared,
+so the transform finds comments via `tokenize` too — a `#:` inside a string
+literal is not a label (critical invariant 5).
+
+**Pairing is by COUNT, not by shape.** A label used once is the ordinary
+`N)` order prefix and is left completely alone (silently); a label used twice
+is a footnote; three or more is an error. This is what lets old-format
+single-occurrence prefixes and new-format footnotes mix in one file, and it
+means nothing written before footnotes existed can change meaning — every
+label in such a file occurs once. Of the two occurrences, whichever is on a
+line of its own supplies the body (if both are, the second does; if neither
+is, they can't be merged without deleting code, so they're left alone with a
+note).
+
+`_footnote_comment()` merges the two texts **per pass** (`split_narration()`
+on each, concatenate part1s and part2s) and re-emits `N) part1 / part2`. The
+label is deliberately NOT re-attached to the walkthrough side, so the result
+is textually identical to having typed the body inline after the `N)` — and
+`N)` therefore keeps its normal per-pass meaning. **An earlier version did
+re-attach it to both passes** (to stop the passes ordering differently); that
+silently forced the walkthrough pass to be numbered, so a single footnote in
+a file whose walkthrough pass was otherwise unnumbered tripped
+`order_markers()`'s all-or-none check. Don't reintroduce it — number the
+walkthrough side inside the body (`/ 2) text`) if it needs ordering.
+
+Inheriting the order prefix also inherits `--every` rejection. After removing
+a block the transform strips trailing blank lines it left behind —
+`plan_canvas()` sizes every frame from the full code and `_render_code()`
+keeps blank rows (invariant 12), so they'd add dead height to the whole video.
 
 #### Inline pauses within a narration line (orthogonal to everything above)
 
@@ -298,7 +358,17 @@ combinations:
     already do (pygments accepts either natively); `plan_canvas()`'s
     background-color lookup does not (`get_style_by_name()` requires a
     string), so it goes through `_resolve_style()` instead — don't call
-    `get_style_by_name(STYLE)` directly. Relatedly, caption/rule colors
+    `get_style_by_name(STYLE)` directly. `_resolve_style()` is also where
+    the background override is applied, so **both** consumers must go
+    through it — `plan_canvas()` for the canvas fill and `_render_code()`
+    for the pygments code block. Passing a bare `STYLE` to `ImageFormatter`
+    again would paste a differently-colored code rectangle onto the canvas.
+    Since `--style`/`--bg-color` made these per-render rather than global,
+    `plan_canvas()` resolves them **exactly once** and stores the result on
+    `Canvas.style`; `compose()` passes `cv.style` down to `_render_code()`.
+    Resolving again per frame from the globals instead would let one video
+    mix two themes (and would re-run `StyleMeta` per frame — the reason
+    `_with_background()` is `lru_cache`d). Relatedly, caption/rule colors
     (`COL_CAPTION`/`COL_RULE`) are hardcoded for a DARK background; a light
     STYLE (e.g. `LightModernStyle`) needs `COL_CAPTION_LIGHT`/`COL_RULE_LIGHT`
     instead, or the caption is nearly invisible. `plan_canvas()` picks
@@ -316,6 +386,31 @@ combinations:
     out of alignment with `--export-script`'s numbering — the same class of
     bug the manual-backend/`--record` numbering code elsewhere already
     guards against (see "TTS backends" below).
+
+15. **The highlight band is redrawn by `_tighten_highlight()`, and that
+    depends on three pygments behaviours.** `ImageFormatter.format()` (a)
+    fills the band across the FULL image width, (b) fills it *before* drawing
+    any text, and (c) passes an `ImageDraw.rectangle` bottom coordinate of
+    `y + recth`, which is **inclusive** — so its band is one row taller than
+    the line box and bleeds into the top row of the next line. (a) is why the
+    band needs redrawing at all (no left padding, arbitrary right padding);
+    (b) is what makes repainting safe, since anything still exactly
+    `hl_color` inside those rows is band and nothing else; (c) is why every
+    rectangle drawn here must reach `y_bot` — stopping a row short leaves a
+    1px full-width stripe of the old band under the highlighted line (a real
+    bug, caught visually then pinned down by pixel probe). Related: rows are
+    uniform and the image is exactly `len(code.splitlines())` of them tall
+    (verified against leading blanks, trailing blanks and `_visible_code()`'s
+    sparse shapes), which is how the band's y-range is located without
+    touching pygments internals.
+
+16. **`_render_code()` adds an `HL_PAD` background margin down each side,
+    always — highlighted or not.** It's what gives a highlight on an
+    unindented line somewhere to put its left padding (pygments starts column
+    0 hard against x=0). It must be unconditional because `plan_canvas()`
+    measures the code column from an *unhighlighted* render while `compose()`
+    draws highlighted ones; if only one grew, the column would be mismeasured
+    and the state panel could overlap the code (invariant 1).
 
 ### TTS backends
 
@@ -576,23 +671,147 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   `FPS`, `TYPE_*`, `AUDIO_*`, colours). Add config there, not as magic numbers.
 - **ffmpeg is called via `subprocess.run`** with stdout/stderr to DEVNULL and
   `check=True`. Follow that pattern; surface real errors (see `synth_piper`).
-- Private helpers are `_prefixed`. Rendering is split: `_render_code` (pygments)
-  vs `render_panel`/`_draw_caption` (hand-drawn PIL).
+- Private helpers are `_prefixed`. Rendering is split: `_render_code`
+  (pygments, plus a hand-drawn pass over the highlight band in
+  `_tighten_highlight`) vs `render_panel`/`_draw_caption` (hand-drawn PIL).
 
 ### Common changes
 
 - **Add a TTS backend:** write `synth_x(text, out)->path`, add to `BACKENDS`. Done.
-- **Change theme/font:** edit `STYLE` — either a registered pygments style
-  name (default: `"monokai"`), or a `pygments.style.Style` subclass assigned
-  directly, e.g. `STYLE = DarkModernStyle` (no pygments registration/entry
-  point needed; `_resolve_style()` handles both — see critical invariant 13).
-  Two such classes ship in `screencast.py`: `DarkModernStyle` and
-  `LightModernStyle`, colors taken directly from VS Code's own
-  theme-defaults source (its current built-in "Dark Modern"/"Light Modern"
-  themes). `plan_canvas()` picks readable caption/rule colors for whichever
-  STYLE is active via `_is_light()` (background luminance) — see invariant 13.
-  Also edit `FONT_NAME`/`FONT_SIZE` (code) and `PANEL_FONT_SIZE` (state
-  panel) for font changes; panel background/text colours (`PANEL_BG`,
+- **Recolor the state panel:** `--state-bg-color '#rrggbb'` /
+  `--state-fg-color '#rrggbb'` (or the `SNIPPET_CAST_STATE_*_COLOR` env vars,
+  or `build(state_bg_color=..., state_fg_color=...)`) —
+  `resolve_panel_args()`/`_panel_colors()`/`PanelColors`. See the theme bullet
+  below for why `--state-fg-color` covers names and values together.
+- **Recolor the highlight band:** `--highlight-color '#rrggbb'`
+  (`SNIPPET_CAST_HIGHLIGHT_COLOR`, `build(highlight_color=...)`, default
+  `HIGHLIGHT_COLOR = None` = the style's own). Applied through
+  `_resolve_style()`/`_with_colors()` like `--bg-color`, which is what keeps
+  pygments' band and `_tighten_highlight()`'s repainted edges the same color
+  — overriding only one would leave two-tone edges. Worth setting for any
+  style that declares no `highlight_color`: pygments' unset default is a pale
+  `#ffffcc`, and **both** shipped `Style` classes are in that boat, so
+  `--style dark-modern` alone gives a pale-yellow band.
+- **Use a Pandoc/KDE `.theme` file:** `--style path/to/x.theme` —
+  `load_theme()` maps its `text-styles` onto pygments tokens via
+  `THEME_TOKEN_MAP` — **the one place the two token vocabularies meet, and
+  the only thing to edit when a theme reads wrong.** No color is hardcoded
+  anywhere downstream. `_style_by_name()` only tries a file load once the
+  string matches no built-in and no registered pygments name, so a `.theme`
+  can never shadow a real style name.
+
+  Two rules govern the mapping, both learned by getting it wrong (the first
+  version colored `def`/`for`/`return` dark red and the name after `def` dark
+  red too, neither of which is how the theme renders in pandoc):
+
+  1. **Map onto the entry covering the same construct set — and where
+     pygments is coarser, that is the theme's more GENERAL entry.**
+     `PythonLexer` emits plain `Token.Keyword` for `def`/`class` *and*
+     `for`/`if`/`return`, so the union goes to `"Keyword"`, never the
+     narrower `"ControlFlow"`. Mapping the union onto the narrower entry is
+     backwards and recolors the other half. Note `in`/`is`/`and`/`or`/`not`
+     are `Token.Operator.Word`, not `Token.Keyword` — they need their own
+     entry pointing at `"Keyword"` too.
+  2. **Map only what the theme actually classifies.** KSyntaxHighlighting's
+     Python definition colors keywords, builtins and literals, NOT
+     identifiers the user writes — so `Name.Function` (the name after
+     `def`), `Name.Class` and `Name.Namespace` are deliberately ABSENT and
+     inherit `Name` -> `"Variable"`, i.e. the theme's plain text color.
+     Adding them back invents a color the theme never asked for.
+
+  Anything unlisted falls through pygments' own token inheritance to `Token`,
+  which `load_theme()` sets from the theme's top-level `text-color`. Verify a
+  mapping change through the *lexer*, not by eye — see
+  `test_theme_colors_a_real_snippet_token_by_token`, which pins every token
+  of a real snippet; a per-entry guess can look plausible and still be wrong
+  for the token pygments actually emits.
+
+  The format has no highlight color, so one is derived by nudging the
+  background `THEME_HL_MIX` toward black or white (per `_is_light`) rather
+  than inheriting pygments' pale default. `load_theme()` is `lru_cache`d on
+  the path because `_render_code()` resolves the style once per *frame*.
+- **Change theme/background:** a per-run option, not a source edit —
+  `--style NAME` / `--bg-color '#rrggbb'` on the CLI and the cell magic,
+  `SNIPPET_CAST_STYLE` / `SNIPPET_CAST_BG_COLOR` as env vars, or
+  `build(style=..., bg_color=...)` programmatically. `STYLE`/`BG_COLOR`
+  remain the module-level *defaults* those fall back to. **The shipped
+  default is `STYLE = "numpy"` with `BG_COLOR = None`** — the packaged
+  `numpy.theme` (a LIGHT theme, `#F3F4F5`), with `BG_COLOR` left at `None`
+  precisely so the theme's own background comes through. Those two go
+  together: setting `BG_COLOR` back to a dark color while `STYLE` is a light
+  theme renders dark-on-dark. `PANEL_BG`/`COL_*` were retuned to light to
+  match. The previous dark look is `--style monokai --bg-color '#1F1F1F'
+  --state-bg-color '#181818'`. `--style` takes a `BUILTIN_STYLES` key, a
+  `BUILTIN_THEMES` key, any registered pygments style name, a path to a
+  `.theme` file, or — programmatically only, since the CLI
+  can only pass a string — a
+  `pygments.style.Style` subclass directly (no pygments registration/entry
+  point needed; `_resolve_style()` handles all three — see critical invariant
+  13). `--style list` prints every valid name and exits; **this is why
+  `main()`'s `input` positional is `nargs="?"`** — it's the one invocation
+  with nothing to render, and every other path still requires it via an
+  explicit `ap.error()`. `BUILTIN_STYLES` maps `"dark-modern"`/
+  `"light-modern"` to the two `Style` subclasses shipped in `screencast.py`
+  (`DarkModernStyle`/`LightModernStyle`, colors taken directly from VS Code's
+  own theme-defaults source for its built-in "Dark Modern"/"Light Modern"
+  themes); the dict exists *because* those aren't registered with pygments,
+  so `get_style_by_name()` can't find them and `--style` couldn't otherwise
+  reach them. `BUILTIN_THEMES` does the same job for `.theme` files shipped
+  *inside* the package (`src/snippet_cast/themes/`, declared in pyproject's
+  `[tool.setuptools.package-data]` — verified present in a built wheel), so
+  `--style numpy` resolves from an install rather than only inside a
+  checkout; they're loaded lazily by `_style_by_name()`, which checks
+  built-ins and the pygments registry BEFORE the filesystem so a stray file
+  named `monokai` in the working directory can't shadow a real style.
+  `style_names()` is the single source for every listing and error message.
+  `resolve_style_args()` (shared by `main()` and `magic.py`, both
+  of which pass the raw strings through it) validates a name against both
+  sources and normalizes the `--bg-color` spelling `"none"` to Python `None`
+  — raising `ValueError` that each front end renders its own way (`sys.exit`
+  vs. a stderr print), so an unknown style is caught at parse time instead of
+  as a pygments `ClassNotFound` from inside the first frame render, *after*
+  the trace has already executed the user's snippet. `--bg-color` is
+  deliberately restricted to `#rrggbb` (not the wider set PIL accepts)
+  because `_is_light()` parses it by slicing those exact six hex digits.
+  `plan_canvas()` picks readable caption/rule colors for whichever background
+  actually wins via `_is_light()` (luminance) — see invariant 13.
+  `bg_color` overrides whatever background the style itself declares without
+  touching its syntax colors; it does NOT adapt them, so pairing a dark
+  background with a light style is on the caller. Note the three-state
+  argument: `bg_color=None` means "no override, use the style's own", which
+  is NOT the same as the caller saying nothing — hence the `_USE_DEFAULT`
+  sentinel as the parameter default down the whole chain (`build()` ->
+  `_render_from_beats()` -> `plan_canvas()` -> `_resolve_style()`).
+  The state panel has its own per-run pair, `--state-bg-color` /
+  `--state-fg-color` (`SNIPPET_CAST_STATE_BG_COLOR` /
+  `SNIPPET_CAST_STATE_FG_COLOR`, `build(state_bg_color=, state_fg_color=)`),
+  validated by `resolve_panel_args()` and resolved once into a `PanelColors`
+  carried on `Canvas.panel` — same "resolve once, every frame draws from it"
+  rule as `Canvas.style`. `--state-fg-color` is deliberately ONE knob for all
+  the panel's text: it sets names and values alike and blends the header
+  `HEADER_DIM` toward the background so the label stays subordinate; the
+  default navy-names/black-values split needs `COL_NAME`/`COL_VALUE`
+  edited instead. Those constants (`PANEL_BG`, `COL_HEADER`, `COL_NAME`,
+  `COL_VALUE`) remain the fallbacks, and are independent of STYLE and
+  `BG_COLOR` — which means **they do not follow a `--style` change**, so a
+  dark style needs its own `--state-*-color` pair (that asymmetry is
+  deliberate: the panel is its own contrasting box, see `render_panel()`).
+  `PANEL_BG` must stay a visible step away from the active page background or
+  the STATE box blends into it and disappears — a real bug twice over now
+  (`#1e1f1c` against `#1F1F1F`, then `#181818` against the light default;
+  now `#E8E9EA` against `#F3F4F5`).
+  `LINE_PAD` is the px of vertical breathing room in each code row, and
+  `HL_PAD` (defined as `LINE_PAD`) is how far the highlight band extends past
+  its line's text on the left and right — kept equal so the band has the same
+  padding on all four sides; raising `HL_PAD` alone would widen every frame,
+  since the same value sets the side margins `_render_code()` adds (see
+  invariants 15 and 16).
+  Edit `FONT_NAME`/`FONT_SIZE` (code) and `PANEL_FONT_SIZE` (state
+  panel) for font changes — `PANEL_FONT_SIZE` is defined as `FONT_SIZE`, so
+  the panel's name/value text mirrors the code by default and only needs its
+  own literal if you deliberately want them to differ (`GAP` is the px
+  separation between the code column and the panel); panel background/text
+  colours (`PANEL_BG`,
   `COL_HEADER`, `COL_NAME`, `COL_VALUE`) are separate constants, not derived
   from STYLE — they're drawn in their own contrasting box regardless of the
   main background (see `render_panel()`), so they don't need to be. Both the
@@ -610,6 +829,11 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   first-exec only, auto-detected, no flag needed. `TWO_PASS_SEP` changes the
   separator character; `PART2_EMPTY_HOLD` is how long the walkthrough pass
   holds a beat whose part2 text is empty.
+- **Footnote narration:** use the same `N)` label twice — once on the line it
+  narrates, once on a comment-only block holding the text (wrapping over
+  plain `#` lines) — `resolve_footnotes()`/`_footnote_comment()`, first-exec
+  only, auto-detected, no flag needed. Pairing is by occurrence count, so
+  single-occurrence `N)` order prefixes mix freely with it in one file.
 - **Custom narration order:** add a leading `N)` to a `#:` narration
   (`_parse_order`/`order_markers`, `_ORDER_RE`); first-exec only, per-pass in
   two-pass mode, no flag needed — all-or-none per pass, else `sys.exit`.

@@ -74,6 +74,35 @@ order; a pass may not mix numbered and unnumbered lines. Not supported
 together with --every (there, beat order already follows execution, not
 marker order).
 
+FOOTNOTE NARRATION: when a narration is too long to sit in the code's right
+margin, use the SAME ``N)`` label twice — once on the line it narrates, once
+on a comment-only block elsewhere (by convention at the bottom) holding the
+text, which may wrap over plain ``#`` lines:
+
+    total = 0           #: 1)
+    for i in range(4):  #: 2)
+        total += i
+
+    #: 1) We start with a running total of zero, because an accumulation
+    # has to begin somewhere. / Here the total is still {total}.
+    #: 2) Then we walk the numbers zero through three. / i is now {i}.
+
+Before anything else runs, the block's text is unwrapped into a single line,
+APPENDED to whatever text the other occurrence already has (often none), and
+the block is deleted — so it never shows up as code. The result is textually
+identical to having typed the body inline, so ``{var}``, ``/`` and ``..``
+work in a body exactly as they do anywhere, and the ``N)`` keeps its usual
+per-pass playback-order meaning (number the ``/`` side inside the body if
+you want the walkthrough pass ordered too).
+
+A label is a footnote purely by COUNT — two occurrences pair up, one is left
+alone — so the plain one-occurrence ``N)`` order prefix and two-occurrence
+footnotes mix freely in the same file, and nothing written before footnotes
+existed can change meaning. Of the two, whichever sits on a line of its own
+supplies the body (if both do, the second one does); two code-bearing
+occurrences can't be merged and are left alone with a note. Three or more is
+an error. Like any ``N)`` prefix, not supported with --every.
+
 MANUAL RECORDING WORKFLOW: instead of a TTS backend, you can narrate a
 snippet in your own voice. `--export-script` prints the exact ordered,
 numbered list of narration lines to read (in two-pass mode: every writing-pass
@@ -108,6 +137,13 @@ USAGE (installed console script):
     snippet-cast input.py -o out.mp4 --typing        # type each new line in
     snippet-cast input.py -o out.mp4 --typing --typing-speed 0.06  # slower typing
     snippet-cast input.py -o out.mp4 --pause 0.6     # breathing gap between beats
+    snippet-cast input.py -o out.mp4 --style github-dark        # syntax theme
+    snippet-cast --style list                                   # list all themes
+    snippet-cast input.py -o out.mp4 --style light-modern --bg-color none
+    snippet-cast input.py -o out.mp4 --state-bg-color '#0d1117' \
+        --state-fg-color '#9cdcfe'                              # state panel
+    snippet-cast input.py -o out.mp4 --highlight-color '#2a2d2e' # highlight band
+    snippet-cast input.py -o out.mp4 --style mytheme.theme       # pandoc/KDE theme
     snippet-cast input.py --export-script > script.txt        # narration to record
     snippet-cast input.py -o out.mp4 --tts manual \
         --manual-audio-dir recordings/                        # use recordings
@@ -134,6 +170,7 @@ TTS backends (choose with --tts):
 
 import argparse
 import ast
+import functools
 import io
 import json
 import math
@@ -150,32 +187,64 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 from pygments import highlight
 from pygments.formatters import ImageFormatter
 from pygments.lexers import PythonLexer
 from pygments.style import Style
-from pygments.styles import get_style_by_name
+from pygments.styles import get_all_styles, get_style_by_name
 from pygments.token import Comment, Error, Keyword, Name, Number, Operator, String, Token
 
 # ---------------------------------------------------------------------------
 # Config — tweak freely.
 # ---------------------------------------------------------------------------
+# "argument not given" sentinel, needed wherever None is itself a meaningful
+# value the caller may pass — `bg_color=None` means "no override, use the
+# style's own background", which is NOT the same as "caller said nothing".
+_USE_DEFAULT = object()
+
 MARKER = "#:"           # trailing-comment token that marks a narration line
-STYLE = "monokai"       # any registered pygments style name, OR a
-                        # pygments.style.Style subclass (no registration needed)
+STYLE = "numpy"         # default syntax theme: a BUILTIN_STYLES key, a
+                        # BUILTIN_THEMES key (a packaged .theme file), any
+                        # registered pygments style name, a path to a .theme
+                        # file, OR a pygments.style.Style subclass (no
+                        # registration needed). Overridable per run with
+                        # --style / SNIPPET_CAST_STYLE / build(style=).
+                        # For the previous dark look: --style monokai
+                        # --bg-color '#1F1F1F'.
+BG_COLOR = None         # background behind BOTH the code and the whole canvas,
+                        # overriding STYLE's own background_color (syntax colors
+                        # are untouched). None = use whatever STYLE provides,
+                        # which is what lets the default light theme through.
+                        # Overridable per run with --bg-color / SNIPPET_CAST_
+                        # BG_COLOR / build(bg_color=).
+HIGHLIGHT_COLOR = None  # band behind the highlighted code line, overriding
+                        # STYLE's own highlight_color. None = use the style's
+                        # (pygments' unset default is a pale "#ffffcc", which
+                        # is why DarkModernStyle needs one passed). Overridable
+                        # with --highlight-color / SNIPPET_CAST_HIGHLIGHT_COLOR
+                        # / build(highlight_color=).
 FONT_NAME = "DejaVu Sans Mono"
 FONT_SIZE = 26
-PANEL_FONT_SIZE = 32    # state-panel name/value text; header is PANEL_FONT_SIZE - 8
+PANEL_FONT_SIZE = FONT_SIZE  # state-panel name/value text — mirrors the code font
+                             # size by default; header is PANEL_FONT_SIZE - 8
 FPS = 30
 WORDS_PER_SEC = 2.6     # only used by the 'silent' backend to fake durations
+LINE_PAD = 6            # px of vertical breathing room added to each code row
+HL_PAD = LINE_PAD       # px the highlight band extends past its line's text,
+                        # left and right — kept equal to LINE_PAD so the band
+                        # has the same padding on all four sides
 PAD = 40                # px padding around the code on the canvas
-GAP = 36                # px between the code column and the state panel
+GAP = 72                # px between the code column and the state panel
 PANEL_PAD = 22          # inner padding of the state panel
-PANEL_BG = "#1e1f1c"    # state-panel background (a touch off from the code bg)
-COL_HEADER = "#75715e"  # muted grey for the panel header / "(no state)"
-COL_NAME = "#a6e22e"    # variable names
-COL_VALUE = "#f8f8f2"   # variable values
+PANEL_BG = "#E8E9EA"    # state-panel background — must stay a visible step off
+                        # BG_COLOR/STYLE's background or the box disappears
+COL_HEADER = "#6D6D6D"  # muted grey for the panel header / "(no state)"
+COL_NAME = "#000080"    # variable names
+COL_VALUE = "#000000"   # variable values
+HEADER_DIM = 0.45       # how far --state-fg-color is blended toward the panel
+                        # background for the "STATE" header / "(no state)", so
+                        # the label stays subordinate to the values it labels
 MAXVAL = 42             # truncate a value's repr to this many chars
 CAP_PAD = 24            # inner padding of the caption band
 CAP_GAP = 10            # px between wrapped caption lines
@@ -289,6 +358,23 @@ class LightModernStyle(Style):
     }
 
 
+# The two styles above aren't registered with pygments, so get_style_by_name()
+# can't find them — this is what makes them reachable by name from --style /
+# SNIPPET_CAST_STYLE, where only a string can be passed. Names are checked
+# here first, then against pygments' own registry (see resolve_style_args()).
+BUILTIN_STYLES = {
+    "dark-modern": DarkModernStyle,
+    "light-modern": LightModernStyle,
+}
+
+# .theme files shipped inside the package (see load_theme), reachable by bare
+# name from --style so they work from any directory, not just a checkout.
+# Resolved lazily by _style_by_name(): the file is only read if the name is
+# actually used, and load_theme() caches it after that.
+THEME_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "themes")
+BUILTIN_THEMES = {"numpy": "numpy.theme"}
+
+
 # ---------------------------------------------------------------------------
 # Parsing: split code from trailing #: narration, robustly (via tokenize, so a
 # '#' inside a string literal is never mistaken for a comment).
@@ -310,9 +396,12 @@ class Beat:
     state: dict               # {name: repr} for the panel (may be empty)
 
 
-def parse(source: str):
-    lines = source.splitlines()
-    comments = {}  # 1-based line -> (comment_start_col, comment_text)
+def _scan_comments(source: str):
+    """1-based line number -> (comment_start_col, comment_text) for every
+    COMMENT token. Shared by parse() and resolve_footnotes() so both find
+    comments the same way — via tokenize, never a regex, so a '#' inside a
+    string literal is never mistaken for one (critical invariant 5)."""
+    comments = {}
     toks = tokenize.generate_tokens(io.StringIO(source).readline)
     try:
         for tok in toks:
@@ -320,17 +409,31 @@ def parse(source: str):
                 comments[tok.start[0]] = (tok.start[1], tok.string)
     except tokenize.TokenError:
         pass  # tolerate incomplete input
+    return comments
+
+
+def _marker_text(comment: str):
+    """The narration text of a MARKER comment token, or None for an ordinary
+    '#' comment."""
+    body = comment[1:].lstrip()             # drop leading '#'
+    marker_body = MARKER[1:]                # part of marker after '#'
+    if not body.startswith(marker_body):
+        return None
+    return body[len(marker_body):].strip()
+
+
+def parse(source: str):
+    lines = source.splitlines()
+    comments = _scan_comments(source)
 
     code_lines, markers = [], []
     for i, raw in enumerate(lines, start=1):
         narration = None
         if i in comments:
             col, text = comments[i]
-            body = text[1:].lstrip()            # drop leading '#'
-            marker_body = MARKER[1:]            # part of marker after '#'
-            if body.startswith(marker_body):
-                narration = body[len(marker_body):].strip()
-                raw = raw[:col].rstrip()        # strip the narration comment
+            narration = _marker_text(text)
+            if narration is not None:
+                raw = raw[:col].rstrip()    # strip the narration comment
         code_lines.append(raw)
         if narration:
             markers.append(Marker(i, narration, has_code=bool(raw.strip())))
@@ -482,6 +585,150 @@ def order_markers(markers, texts):
     return out
 
 
+
+# ---------------------------------------------------------------------------
+# Footnote narration: keep a long narration out of the code's right margin by
+# writing the SAME 'N)' label twice — once on the line it narrates, once on a
+# comment-only block elsewhere holding the text, which may wrap over plain '#'
+# lines. resolve_footnotes() appends the second occurrence's text to the
+# first's and deletes the block:
+#
+#     assert fib(7) == 13  #: 1)
+#
+#     #: 1) Always begin by writing a test. That has the added
+#     # benefit of running your function. / Call fib with seven.
+#
+# becomes, in memory:
+#
+#     assert fib(7) == 13  #: 1) Always begin by writing a test. That has
+#            the added benefit of running your function. / Call fib with seven.
+#
+# It is a source -> source transform run BEFORE parse()/trace_run()/
+# loop_body_ranges(), so every line number downstream re-derives from the
+# rewritten text and nothing else in the pipeline needs to know about it.
+#
+# A label is a footnote purely by COUNT: two occurrences pair up, one is left
+# exactly as it always was. That is what lets the old single-occurrence 'N)'
+# order prefix and a two-occurrence footnote mix freely in one file — and it
+# means a file that predates footnotes cannot change meaning, since every
+# label in it occurs once.
+#
+# The merge is per pass (see _footnote_comment): the label is NOT re-attached
+# to the walkthrough side, so the result is textually identical to having
+# typed the body inline after the 'N)'. Numbering therefore stays per pass,
+# exactly as order_markers() has always treated it — number the walkthrough
+# side inside the body ('/ 2) text') if you want it ordered too. An earlier
+# version did re-attach the label to both passes to keep them in step; that
+# silently forced the walkthrough pass to be numbered, so ONE footnote in an
+# otherwise walkthrough-unnumbered file tripped order_markers()' all-or-none
+# check — the exact failure this design avoids.
+# ---------------------------------------------------------------------------
+def _footnote_comment(label, head, body):
+    """The '#: ...' comment one footnote line is rewritten to: `body` (the
+    second occurrence's text) appended to `head` (the first's own text, often
+    empty), joined PER PASS so a '/' on either side keeps its meaning."""
+    h1, h2 = split_narration(head)
+    b1, b2 = split_narration(body)
+    part1 = " ".join(p for p in (h1, b1) if p)
+    part2 = " ".join(p for p in (h2, b2) if p)
+    if part1:
+        return f"{MARKER} {label}) {part1} {TWO_PASS_SEP} {part2}"
+    return f"{MARKER} {label}) {part2}"
+
+
+def resolve_footnotes(source: str):
+    """Merge each doubly-labelled `N)` narration into one line and drop the
+    block that held the body, returning the rewritten source (the original,
+    unchanged, if no label occurs twice).
+
+    Of the two occurrences, the one on a line of its own supplies the body
+    (and absorbs any plain `#` comment lines wrapped under it); the other
+    receives it. Two comment-only occurrences fall back to source order —
+    the second supplies. Two code-bearing ones can't be merged (deleting
+    either would delete code), so they're left alone with a note."""
+    lines = source.splitlines()
+    comments = _scan_comments(source)
+
+    def marker_at(i):
+        """(col, narration text) if 1-based line `i` carries a MARKER."""
+        if i not in comments:
+            return None
+        col, raw = comments[i]
+        text = _marker_text(raw)
+        return None if text is None else (col, text)
+
+    def comment_only(i, col):
+        return not lines[i - 1][:col].strip()
+
+    def continuation_at(i):
+        """The text of a footnote body's wrapped continuation: a whole-line
+        plain '#' comment. None for anything else — code, a blank line, a
+        '#:' marker or a trailing comment — each of which ends the block."""
+        if i not in comments:
+            return None
+        col, raw = comments[i]
+        if not comment_only(i, col) or _marker_text(raw) is not None:
+            return None
+        return raw[1:].strip()
+
+    labelled = {}       # label -> [(line, col, text, comment_only)] in source order
+    for i in range(1, len(lines) + 1):
+        m = marker_at(i)
+        if m is None:
+            continue
+        col, text = m
+        label, rest = _parse_order(text)
+        if label is not None:
+            labelled.setdefault(label, []).append((i, col, rest, comment_only(i, col)))
+
+    pastes, drop = {}, set()
+    for label, occ in sorted(labelled.items()):
+        if len(occ) == 1:
+            continue        # the old single-occurrence 'N)' order prefix
+        if len(occ) > 2:
+            sys.exit(f"'{label})' appears {len(occ)} times (lines "
+                     f"{', '.join(str(o[0]) for o in occ)}) — a footnote is "
+                     f"exactly two: the line it narrates and its body.")
+        alone = [o for o in occ if o[3]]
+        if not alone:
+            print(f"note: '{label})' is used on two code lines "
+                  f"({occ[0][0]} and {occ[1][0]}) — left alone; a footnote "
+                  f"body has to sit on a line of its own.")
+            continue
+        # One on its own line supplies the body; if both are, the second does.
+        body_occ = alone[-1] if len(alone) == 2 else alone[0]
+        head_occ = occ[0] if occ[1] is body_occ else occ[1]
+
+        body, stop = [body_occ[2]], body_occ[0] + 1
+        while (cont := continuation_at(stop)) is not None:
+            if cont:
+                body.append(cont)
+            stop += 1
+        head_line, head_col, head_text, _ = head_occ
+        pastes[head_line] = (head_col, _footnote_comment(
+            label, head_text, " ".join(p for p in body if p)))
+        drop.update(range(body_occ[0], stop))
+
+    if not pastes:
+        return source
+
+    out = []
+    for i, raw in enumerate(lines, start=1):
+        if i in drop:
+            continue
+        if i in pastes:
+            col, comment = pastes[i]
+            raw = raw[:col] + comment
+        out.append(raw)
+    # Removing a trailing footnote block usually leaves the blank line that
+    # separated it behind; plan_canvas() sizes the canvas from the full code
+    # (and _render_code keeps blank rows, invariant 12), so those would add
+    # dead height to every frame.
+    while out and not out[-1].strip():
+        out.pop()
+    return "\n".join(out) + ("\n" if source.endswith("\n") else "")
+
+
 def _mono_font_path():
     """First existing path from _FONT_CANDIDATES, or None."""
     for path in _FONT_CANDIDATES:
@@ -500,24 +747,60 @@ def _mono_font(size):
     return ImageFont.load_default()
 
 
-def render_panel(vars_dict, width, height):
+@dataclass
+class PanelColors:
+    """The state panel's four resolved colors. Defaults are the module
+    constants, i.e. exactly the look before --state-*-color existed."""
+    bg: str = PANEL_BG
+    header: str = COL_HEADER
+    name: str = COL_NAME
+    value: str = COL_VALUE
+
+
+def _mix(fg, bg, t):
+    """`fg` blended `t` of the way toward `bg`, as '#rrggbb'."""
+    a = [int(fg.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)]
+    b = [int(bg.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)]
+    return "#" + "".join(f"{round(x + (y - x) * t):02x}" for x, y in zip(a, b))
+
+
+def _panel_colors(state_bg=None, state_fg=None):
+    """Resolve the state panel's colors from --state-bg-color/--state-fg-color
+    (either may be None for "not given").
+
+    `state_fg` sets ALL of the panel's text — names and values both — since
+    it is a single knob for "the text in the box"; the header and the
+    "(no state)" placeholder are blended HEADER_DIM toward the background so
+    the label stays quieter than the values, the way the default
+    COL_HEADER/COL_VALUE pair does. Leave it unset to keep the default
+    three-color scheme (green names, off-white values, muted header), or edit
+    COL_NAME/COL_VALUE/COL_HEADER for finer control than one flag gives."""
+    bg = state_bg or PANEL_BG
+    if not state_fg:
+        return PanelColors(bg=bg)
+    return PanelColors(bg=bg, header=_mix(state_fg, bg, HEADER_DIM),
+                       name=state_fg, value=state_fg)
+
+
+def render_panel(vars_dict, width, height, colors=None):
     """A fixed-size 'state' panel listing name = value pairs."""
-    img = Image.new("RGB", (width, height), PANEL_BG)
+    colors = colors or PanelColors()
+    img = Image.new("RGB", (width, height), colors.bg)
     d = ImageDraw.Draw(img)
     font = _mono_font(PANEL_FONT_SIZE)
     head = _mono_font(max(12, PANEL_FONT_SIZE - 8))
     asc, desc = font.getmetrics()
     lh = asc + desc + 8
     x, y = PANEL_PAD, PANEL_PAD
-    d.text((x, y), "STATE", font=head, fill=COL_HEADER)
+    d.text((x, y), "STATE", font=head, fill=colors.header)
     y += lh
     if not vars_dict:
-        d.text((x, y), "(no state)", font=font, fill=COL_HEADER)
+        d.text((x, y), "(no state)", font=font, fill=colors.header)
         return img
     for name, val in vars_dict.items():
-        d.text((x, y), name, font=font, fill=COL_NAME)
+        d.text((x, y), name, font=font, fill=colors.name)
         nw = d.textlength(name + " ", font=font)
-        d.text((x + nw, y), f"= {val}", font=font, fill=COL_VALUE)
+        d.text((x + nw, y), f"= {val}", font=font, fill=colors.value)
         y += lh
     return img
 
@@ -666,23 +949,107 @@ def _two_pass_beats(code_lines, markers, steps):
 # Frame rendering: render onto a fixed-size canvas so every frame shares one
 # resolution (required for clean concat).
 # ---------------------------------------------------------------------------
-def _render_code(code: str, hl_lines):
+def _render_code(code: str, hl_lines, style=None):
+    """`style` is an ALREADY-RESOLVED pygments Style subclass (Canvas.style,
+    i.e. _resolve_style()'s output, background override included). None
+    resolves from the STYLE/BG_COLOR globals — only for standalone use; every
+    render path passes the canvas's own style so one video can't mix two."""
     if not code.strip():
         code = " "  # PIL cannot encode a zero-size image
     # Prefer a concrete font *file* over FONT_NAME's by-name OS lookup: pygments'
     # ImageFormatter loads a path directly (os.path.isfile check in FontManager),
     # which is portable across OSes that don't happen to have a font installed
     # under that exact name (e.g. "DejaVu Sans Mono" isn't a stock macOS font).
+    if style is None:
+        style = _resolve_style()
     fmt = ImageFormatter(
-        font_name=_mono_font_path() or FONT_NAME, font_size=FONT_SIZE, style=STYLE,
-        line_numbers=False, hl_lines=hl_lines, image_pad=0, line_pad=6,
+        font_name=_mono_font_path() or FONT_NAME, font_size=FONT_SIZE,
+        style=style, line_numbers=False, hl_lines=hl_lines,
+        image_pad=0, line_pad=LINE_PAD,
     )
     # stripnl=False: pygments' lexers strip leading/trailing blank lines by
     # default, which would silently collapse a partially-revealed frame's
     # leading blank rows (unrevealed lines rendered as "") and shove its
     # actual content up to row 1 — see _visible_code()/typing_frames().
     png = highlight(code, PythonLexer(stripnl=False), fmt)
-    return Image.open(io.BytesIO(png)).convert("RGB")
+    img = Image.open(io.BytesIO(png)).convert("RGB")
+    # A HL_PAD-wide background margin down each side, so a highlight on an
+    # unindented line has somewhere to put its left padding — pygments starts
+    # column 0 hard against x=0, which would otherwise clamp that side to
+    # nothing while the right side got its full HL_PAD. Added unconditionally,
+    # highlighted or not: plan_canvas() measures the canvas from an
+    # unhighlighted render, so the two must always agree on the width.
+    bg = style.background_color or "#000000"
+    padded = Image.new("RGB", (img.width + 2 * HL_PAD, img.height), bg)
+    padded.paste(img, (HL_PAD, 0))
+    return _tighten_highlight(padded, code, hl_lines, style, HL_PAD) if hl_lines else padded
+
+
+def _tighten_highlight(img, code, hl_lines, style, inset):
+    """Redraw pygments' highlight band so it wraps the highlighted line's own
+    text with HL_PAD of padding on the left and right — matching the padding
+    the row already has above and below — instead of spanning the full image.
+
+    pygments draws hl_lines as a band from x=0 to the image's right edge (see
+    ImageFormatter.format), so out of the box there is no left padding at all
+    and the right-hand gap is just however much shorter the line happens to be
+    than the longest one in the frame.
+
+    Both edges are rebuilt: the band is *trimmed* back with page background
+    where it runs too far, and *extended* in hl_color where it stops too
+    short — including out into the `inset` margin _render_code() adds down
+    each side, which is background, not band, and which is the only reason an
+    unindented line has anywhere to put its left padding.
+
+    Repainting is safe because within the band's own rows the only things
+    pygments has drawn are the band fill and that line's glyphs: it fills the
+    rectangle first, then draws each line's text into its own row, and a row
+    is exactly `fonth + line_pad` tall so no neighbouring glyph reaches in.
+
+    The row geometry is pygments' own: rows are uniform, and the image is
+    exactly `len(code.splitlines())` of them tall (verified across leading
+    blanks, trailing blanks and the sparse shapes _visible_code() emits —
+    pygments drops trailing blank rows and splitlines() agrees). The search
+    for the line's text skips `inset` on each side, since those columns are
+    background: counting them as text would put the bbox at the full image
+    width and change nothing."""
+    rows = len(code.splitlines())
+    if not rows:
+        return img
+    line_h = img.height / rows
+    bg = style.background_color or "#000000"
+    # Same fallback chain ImageFormatter uses for an unset highlight_color.
+    hl = style.highlight_color or "#f90"
+    draw = ImageDraw.Draw(img)
+    for line_no in hl_lines:
+        y0, row_end = round((line_no - 1) * line_h), round(line_no * line_h)
+        if y0 < 0 or y0 >= img.height:
+            continue          # a highlight past the last rendered row
+        # ImageDraw.rectangle takes an INCLUSIVE bottom, and pygments passes
+        # `y + recth` — so its band is one row taller than the line box and
+        # bleeds into the top row of the next line. Every rectangle here has
+        # to reach that same row or a 1px stripe of the old full-width band
+        # survives underneath. Safe to paint over: a row's first pixel row is
+        # always above the glyph tops (the ink starts several px down).
+        y_bot = row_end
+        band = img.crop((inset, y0, img.width - inset, min(row_end, img.height)))
+        ink = ImageChops.difference(band, Image.new("RGB", band.size, hl)).getbbox()
+        if ink is None:
+            # A blank highlighted line: nothing to wrap, so drop the whole
+            # band rather than leave a stray full-width stripe.
+            draw.rectangle([0, y0, img.width - 1, y_bot], fill=bg)
+            continue
+        left, right = inset + ink[0], inset + ink[2]   # text extent, right-exclusive
+        x0, x1 = max(0, left - HL_PAD), min(img.width, right + HL_PAD)
+        if x0 > 0:                        # band ran past the padding: trim
+            draw.rectangle([0, y0, x0 - 1, y_bot], fill=bg)
+        if x0 < left:                     # band stopped short: extend
+            draw.rectangle([x0, y0, left - 1, y_bot], fill=hl)
+        if right < x1:
+            draw.rectangle([right, y0, x1 - 1, y_bot], fill=hl)
+        if x1 < img.width:
+            draw.rectangle([x1, y0, img.width - 1, y_bot], fill=bg)
+    return img
 
 
 def _even(n):
@@ -716,15 +1083,202 @@ class Canvas:
     captions: list       # per-beat list of wrapped caption lines (or None)
     cap_fg: str = COL_CAPTION
     cap_rule: str = COL_RULE
+    style: type = None   # resolved pygments Style (background override applied),
+                         # so every frame of one video renders from the same one
+    panel: object = None # resolved PanelColors, same reason
 
 
-def _resolve_style(style):
-    """STYLE may be a registered pygments style name, or a Style subclass
-    passed directly (pygments.formatter.Formatter accepts either already —
-    see ImageFormatter's `style=` in _render_code() — this mirrors that same
-    isinstance check for the one call site, get_style_by_name(), that only
-    accepts a name)."""
-    return get_style_by_name(style) if isinstance(style, str) else style
+@functools.lru_cache(maxsize=None)
+@functools.lru_cache(maxsize=None)
+def _with_colors(style, bg, hl):
+    """`style` (a Style subclass) with `background_color` and/or
+    `highlight_color` replaced. Either may be None to keep the style's own.
+
+    Subclassing is pygments' own documented way to tweak a style, and leaves
+    the original class untouched — important, since STYLE may be a shared
+    registered style. Cached because _render_code() resolves the style once
+    per *frame*, and each fresh subclass would otherwise re-run StyleMeta."""
+    over = {}
+    if bg:
+        over["background_color"] = bg
+    if hl:
+        over["highlight_color"] = hl
+    if not over:
+        return style
+    return type(f"{style.__name__}Recolored", (style,), over)
+
+
+def _resolve_style(style=None, bg_color=_USE_DEFAULT, hl_color=_USE_DEFAULT):
+    """`style` may be a registered pygments style name, a BUILTIN_STYLES key,
+    or a Style subclass passed directly (pygments.formatter.Formatter accepts
+    a name or a class already — see ImageFormatter's `style=` in
+    _render_code() — this mirrors that same isinstance check for the one call
+    site, get_style_by_name(), that only accepts a name). `None` falls back to
+    the STYLE global.
+
+    A string that names no registered style and no BUILTIN_STYLES key, but
+    does point at a readable file, is loaded as a KSyntaxHighlighting/Pandoc
+    `.theme` — see load_theme().
+
+    `bg_color` and `hl_color`, if truthy, override the resolved style's own
+    background_color / highlight_color; `None` means "no override, use the
+    style's own", and the _USE_DEFAULT sentinel means "caller said nothing"
+    -> the BG_COLOR / HIGHLIGHT_COLOR global. The overrides live here rather
+    than at the call sites because this is the one choke point every consumer
+    shares — plan_canvas()'s canvas fill, _render_code()'s pygments-rendered
+    code block, and _tighten_highlight()'s band. Applying one to only some of
+    them would paste a differently-colored rectangle onto the canvas, or
+    repaint the band in a color it was never drawn in."""
+    if style is None:
+        style = STYLE
+    if bg_color is _USE_DEFAULT:
+        bg_color = BG_COLOR
+    if hl_color is _USE_DEFAULT:
+        hl_color = HIGHLIGHT_COLOR
+    if isinstance(style, str):
+        style = _style_by_name(style)
+    return _with_colors(style, bg_color, hl_color)
+
+
+def style_names():
+    """Every name --style accepts, for listings and error messages (a path to
+    a .theme file is also accepted, but can't be enumerated)."""
+    return (sorted(BUILTIN_STYLES) + sorted(BUILTIN_THEMES)
+            + sorted(get_all_styles()))
+
+
+def _style_by_name(name):
+    """A style NAME (or a path to a .theme file) -> a pygments Style subclass.
+    Package-local names first (BUILTIN_STYLES, then BUILTIN_THEMES), then
+    pygments' own registry, then — only if the string actually points at a
+    file — a .theme load. Checking a file last is what stops a stray
+    `monokai.theme` in the working directory from shadowing a real style."""
+    if name in BUILTIN_STYLES:
+        return BUILTIN_STYLES[name]
+    if name in BUILTIN_THEMES:
+        return load_theme(os.path.join(THEME_DIR, BUILTIN_THEMES[name]))
+    try:
+        return get_style_by_name(name)
+    except Exception:
+        if os.path.isfile(name):
+            return load_theme(name)
+        raise
+
+
+# ---------------------------------------------------------------------------
+# KSyntaxHighlighting / Pandoc ".theme" files (`pandoc --print-highlight-style`,
+# KDE/Kate's syntax themes) as a source of syntax colors, so a theme already
+# used for a book or website can dress the screencast to match.
+#
+# The format is JSON: top-level "text-color"/"background-color" plus a
+# "text-styles" map of token name -> {text-color, background-color, bold,
+# italic, underline}. Its token vocabulary is coarser than pygments' in some
+# places and finer in others, so THEME_TOKEN_MAP below is a deliberate,
+# lossy mapping rather than a translation.
+# ---------------------------------------------------------------------------
+# The mapping below is the ONE place a .theme's token vocabulary meets
+# pygments'. Edit it to retune how a theme is read; nothing downstream
+# hardcodes a color.
+#
+# Two rules keep it honest, both learned from getting it wrong:
+#
+#  1. Map a pygments token onto the theme entry that covers the SAME set of
+#     constructs — and when pygments is the coarser of the two, that means
+#     the theme's more GENERAL entry. pygments' PythonLexer emits plain
+#     Token.Keyword for `def`/`class` and `for`/`if`/`return` alike, so the
+#     union has to land on the theme's "Keyword", not its narrower
+#     "ControlFlow". (This started out on "ControlFlow" on the reasoning that
+#     control-flow keywords are the more common half; that is backwards —
+#     it recolored every declaration keyword too.)
+#
+#  2. Map only what the theme actually classifies. KSyntaxHighlighting's
+#     Python definition colors keywords, builtins and literals — NOT the
+#     identifiers the user writes. So Name.Function (the name after `def`),
+#     Name.Class and Name.Namespace (`numpy` in `import numpy as np`) are
+#     deliberately ABSENT here: they inherit Name -> "Variable", i.e. the
+#     theme's plain text color, which is how pandoc renders them. Adding
+#     them back invents a color the theme never asked for.
+#
+# Anything not listed falls back through pygments' own token inheritance to
+# Token, which load_theme() sets from the theme's top-level "text-color" —
+# so Punctuation, Name.Function and friends all come out as plain text.
+THEME_TOKEN_MAP = {
+    Comment:                "Comment",
+    Keyword:                "Keyword",      # def class for if return pass as ...
+    Keyword.Namespace:      "Import",       # import  from
+    Keyword.Constant:       "Constant",     # True  False  None
+    Operator:               "Operator",     # + - = < > ...
+    Operator.Word:          "Keyword",      # in  is  and  or  not
+    Number:                 "DecVal",
+    Number.Float:           "Float",
+    String:                 "String",
+    String.Char:            "Char",
+    String.Escape:          "SpecialChar",
+    Name:                   "Variable",     # plain identifiers
+    Name.Builtin:           "BuiltIn",      # print  range  len
+    Name.Builtin.Pseudo:    "BuiltIn",      # self  cls
+    Name.Exception:         "BuiltIn",      # ValueError  TypeError
+    Name.Decorator:         "Attribute",    # @decorator
+    Error:                  "Error",
+}
+THEME_HL_MIX = 0.10    # a .theme carries no highlight color, so one is derived
+                       # by nudging its background this far toward black (light
+                       # theme) or white (dark) — a band you can see but that
+                       # doesn't shout, in place of pygments' pale-yellow default
+
+
+def _theme_token_style(entry):
+    """One "text-styles" entry -> a pygments style string ("bold #aa0000")."""
+    parts = []
+    for flag in ("bold", "italic", "underline"):
+        if entry.get(flag):
+            parts.append(flag)
+    if entry.get("text-color"):
+        parts.append(entry["text-color"])
+    if entry.get("background-color"):
+        parts.append(f"bg:{entry['background-color']}")
+    return " ".join(parts)
+
+
+@functools.lru_cache(maxsize=None)
+def load_theme(path):
+    """Build a pygments `Style` subclass from a KSyntaxHighlighting/Pandoc
+    `.theme` JSON file.
+
+    Returned as a class, so it can be assigned to `STYLE`, passed to
+    `build(style=...)`, or named on the command line — `--style` treats a
+    string that matches no known style name but does point at a file as one
+    of these (see _style_by_name()).
+
+    `highlight_color` is derived (THEME_HL_MIX), since the format has no
+    field for it and pygments' unset default is a pale `#ffffcc` that reads
+    badly on most backgrounds. `--highlight-color` overrides it.
+
+    Cached on the path: _render_code() resolves the style once per frame, and
+    re-reading and re-classing the file each time would be wasteful (and each
+    fresh class would defeat _with_colors()' own cache)."""
+    with open(path) as fh:
+        theme = json.load(fh)
+    bg = theme.get("background-color") or "#ffffff"
+    fg = theme.get("text-color") or "#000000"
+    text_styles = theme.get("text-styles") or {}
+
+    styles = {Token: fg}
+    for token, key in THEME_TOKEN_MAP.items():
+        entry = text_styles.get(key)
+        if entry:
+            spec = _theme_token_style(entry)
+            if spec:
+                styles[token] = spec
+
+    toward = "#000000" if _is_light(bg) else "#ffffff"
+    name = "".join(c for c in os.path.basename(path).split(".")[0].title()
+                   if c.isalnum()) or "Theme"
+    return type(f"{name}Style", (Style,), {
+        "background_color": bg,
+        "highlight_color": _mix(bg, toward, THEME_HL_MIX),
+        "styles": styles,
+    })
 
 
 def _is_light(hex_color):
@@ -738,11 +1292,20 @@ def _is_light(hex_color):
     return (0.299 * r + 0.587 * g + 0.114 * b) > 128
 
 
-def plan_canvas(code_lines, beats, show_panel, subtitles):
-    bg = _resolve_style(STYLE).background_color or "#000000"
+def plan_canvas(code_lines, beats, show_panel, subtitles,
+                style=None, bg_color=_USE_DEFAULT,
+                state_bg_color=None, state_fg_color=None,
+                highlight_color=_USE_DEFAULT):
+    """Fix the canvas dimensions (and colors) every frame of one video shares.
+    `style`/`bg_color` and the two `state_*_color`s are resolved exactly once,
+    here, and carried on the returned Canvas — see _resolve_style() and
+    _panel_colors() for what each accepts."""
+    style = _resolve_style(style, bg_color, highlight_color)
+    panel = _panel_colors(state_bg_color, state_fg_color)
+    bg = style.background_color or "#000000"
     cap_fg, cap_rule = (COL_CAPTION_LIGHT, COL_RULE_LIGHT) if _is_light(bg) \
         else (COL_CAPTION, COL_RULE)
-    full = _render_code("\n".join(code_lines), hl_lines=[])
+    full = _render_code("\n".join(code_lines), hl_lines=[], style=style)
     code_w, code_h = full.width, full.height
 
     panel_w = 0
@@ -778,7 +1341,8 @@ def plan_canvas(code_lines, beats, show_panel, subtitles):
         cap_h = 2 * CAP_PAD + max_lines * clh
 
     H = _even(PAD + code_h + PAD + cap_h)
-    return Canvas(W, H, code_w, code_h, panel_w, cap_h, bg, captions, cap_fg, cap_rule)
+    return Canvas(W, H, code_w, code_h, panel_w, cap_h, bg, captions,
+                  cap_fg, cap_rule, style, panel)
 
 
 def _draw_caption(canvas, cv, lines):
@@ -798,9 +1362,9 @@ def _draw_caption(canvas, cv, lines):
 def compose(cv, code_text, hl_lines, state, caption_lines, path):
     """Render one full frame onto the fixed canvas and save it."""
     canvas = Image.new("RGB", (cv.W, cv.H), cv.bg)
-    canvas.paste(_render_code(code_text, hl_lines=hl_lines), (PAD, PAD))
+    canvas.paste(_render_code(code_text, hl_lines=hl_lines, style=cv.style), (PAD, PAD))
     if cv.panel_w:
-        canvas.paste(render_panel(state, cv.panel_w, cv.code_h),
+        canvas.paste(render_panel(state, cv.panel_w, cv.code_h, cv.panel),
                      (PAD + cv.code_w + GAP, PAD))
     if caption_lines is not None:
         _draw_caption(canvas, cv, caption_lines)
@@ -1294,6 +1858,23 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
     # keeps that code on screen throughout instead of re-hiding and
     # progressively re-revealing it; only the highlight/state panel move.
     final_revealed = beats1[-1].revealed
+
+    # --pause also separates the two passes themselves: the writing pass
+    # ends on the fully-typed code and holds it for `pause` seconds before
+    # the walkthrough starts talking. The in-loop guard above deliberately
+    # skips the gap after pass 1's final beat so this one is the only clip
+    # in that seam (and so no pause is ever appended after the whole video).
+    # `pause_frame` is the last pass-1 beat's held frame; it is None only
+    # for a comment-only final marker with no pass-1 narration, in which
+    # case the same fully-typed frame is composed directly.
+    if pause > 0 and beats2:
+        hold = pause_frame or compose(
+            cv, _visible_code(code_lines, final_revealed), [], {},
+            cv.captions[off - 1] if cv.captions is not None else None,
+            os.path.join(work, "p1_endhold.png"))
+        pclip = os.path.join(work, "p1_pause_end.mp4")
+        make_pause_clip(hold, pause, pclip)
+        clips.append(pclip)
     for k, beat in enumerate(beats2):
         caption = cv.captions[off + k] if cv.captions is not None else None
         hold = compose(cv, _visible_code(code_lines, final_revealed),
@@ -1325,7 +1906,7 @@ def _build_all_beats(source_path, trace, every):
     either the two-pass 'walkthrough' pass or, for a non-two-pass file,
     the complete single-pass beat sequence. `bool(beats1)` tells a caller
     whether two-pass mode was used."""
-    source = open(source_path).read()
+    source = resolve_footnotes(open(source_path).read())
     code_lines, markers = parse(source)
     if not markers:
         sys.exit(f"No narration found. Add trailing '{MARKER} ...' comments.")
@@ -1337,7 +1918,8 @@ def _build_all_beats(source_path, trace, every):
     if not two_pass:
         if every and any(_parse_order(m.text)[0] is not None for m in markers):
             sys.exit("Numbered 'N) ' order prefixes require first-exec mode; "
-                     "drop --every or remove the prefixes.")
+                     "drop --every, or remove the prefixes (a footnote "
+                     "reference is one — inline its body to drop it).")
         markers = order_markers(markers, [m.text for m in markers])
 
     steps = trace_run(source, source_path) if trace else []
@@ -1352,7 +1934,9 @@ def _build_all_beats(source_path, trace, every):
 
 def build(source_path, out_path, tts, trace=True, every=False,
           subtitles=False, typing=False, typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT,
-          manual_audio_dir=None):
+          manual_audio_dir=None, style=None, bg_color=_USE_DEFAULT,
+          state_bg_color=None, state_fg_color=None,
+          highlight_color=_USE_DEFAULT):
     """
     Render an annotated Python snippet into a narrated screencast video.
 
@@ -1390,11 +1974,42 @@ def build(source_path, out_path, tts, trace=True, every=False,
         Seconds of silence to hold on each beat's frame after its narration
         finishes, before the next beat begins [default: `PAUSE_DEFAULT`]. `0`
         cuts directly from one beat's narration to the next. In two-pass mode
-        this only applies to the walkthrough pass.
+        it applies within both passes and at the seam between them (the
+        writing pass holds its finished code for `pause` seconds before the
+        walkthrough starts). Never appended after the video's final beat.
     manual_audio_dir :
         Directory of pre-recorded audio files for `tts="manual"`, named
         001.wav, 002.wav, ... (or .mp3/.m4a/.aiff/.flac/.ogg) matching
         `export_script()`'s numbering.
+    style :
+        Syntax highlighting theme for this render: a registered pygments
+        style name, a `BUILTIN_STYLES` key (`"dark-modern"`/`"light-modern"`),
+        a path to a KSyntaxHighlighting/Pandoc `.theme` file (see
+        `load_theme()`), or a `pygments.style.Style` subclass. `None` uses
+        the `STYLE` global.
+    highlight_color :
+        `"#rrggbb"` band behind the highlighted code line, overriding the
+        style's own `highlight_color`. `None` uses the style's; omit the
+        argument to use the `HIGHLIGHT_COLOR` global. Worth setting for a
+        style that declares none — pygments' unset default is a pale
+        `#ffffcc` (`DarkModernStyle`/`LightModernStyle` are both in that
+        boat); a style loaded from a `.theme` file gets one derived instead.
+    state_bg_color :
+        `"#rrggbb"` background for the state panel, overriding `PANEL_BG`.
+        `None` keeps it.
+    state_fg_color :
+        `"#rrggbb"` for ALL of the state panel's text — variable names and
+        values both — with the "STATE" header blended `HEADER_DIM` toward the
+        panel background so it stays subordinate. `None` keeps the default
+        three-color scheme (`COL_NAME`/`COL_VALUE`/`COL_HEADER`), which is
+        also where to go for finer control than one color gives.
+    bg_color :
+        `"#rrggbb"` background behind both the code and the canvas, overriding
+        whatever background `style` declares (its syntax colors are left
+        alone — pairing a dark background with a light style is on you).
+        `None` means no override, i.e. the style's own background; omit the
+        argument entirely to use the `BG_COLOR` global. Caption and rule
+        colors adapt to whichever background wins, via `_is_light()`.
 
     Narration split into two passes
     --------------------------------
@@ -1446,11 +2061,16 @@ def build(source_path, out_path, tts, trace=True, every=False,
 
     code_lines, beats1, beats2 = _build_all_beats(source_path, trace, every)
     _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
-                       every, subtitles, typing, typing_speed, pause)
+                       every, subtitles, typing, typing_speed, pause,
+                       style, bg_color, state_bg_color, state_fg_color,
+                       highlight_color)
 
 
 def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
-                       every, subtitles, typing, typing_speed, pause):
+                       every, subtitles, typing, typing_speed, pause,
+                       style=None, bg_color=_USE_DEFAULT,
+                       state_bg_color=None, state_fg_color=None,
+                       highlight_color=_USE_DEFAULT):
     """Render already-computed beats (from _build_all_beats()) to `out_path`.
     Factored out of build() so record_narration() can render straight from
     the beats its interactive session already built — reusing the SAME
@@ -1474,7 +2094,10 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
               f"{len(beats2)} pass-2) -> {out_path}  (backend: {tts}, "
               f"trace: {'on' if trace else 'off'}, two-pass)")
         cv = plan_canvas(code_lines, beats1 + beats2, show_panel=trace,
-                         subtitles=subtitles)
+                         subtitles=subtitles, style=style, bg_color=bg_color,
+                         state_bg_color=state_bg_color,
+                         state_fg_color=state_fg_color,
+                         highlight_color=highlight_color)
         audio_cache = {}
         clips = _render_two_pass(code_lines, beats1, beats2, cv, work, synth,
                                  audio_cache, typing_speed, pause, pause_mode)
@@ -1489,7 +2112,10 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
                                  " +typing" if typing else ""])
     print(f"{len(beats)} beats -> {out_path}  "
           f"(backend: {tts}, trace: {'on' if trace else 'off'}, {mode}{extras})")
-    cv = plan_canvas(code_lines, beats, show_panel=trace, subtitles=subtitles)
+    cv = plan_canvas(code_lines, beats, show_panel=trace, subtitles=subtitles,
+                     style=style, bg_color=bg_color,
+                     state_bg_color=state_bg_color, state_fg_color=state_fg_color,
+                     highlight_color=highlight_color)
 
     audio_cache = {}   # identical narration (e.g. an un-interpolated loop line) -> reuse
     clips = []
@@ -1784,7 +2410,9 @@ def record_narration(source_path, manual_audio_dir, out_path, trace=True,
                      typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT, show_frame=True,
                      build_after=True, input_fn=input,
                      record_fn=_record_until_enter, play_fn=_play,
-                     frame_fn=None):
+                     frame_fn=None, style=None, bg_color=_USE_DEFAULT,
+                     state_bg_color=None, state_fg_color=None,
+                     highlight_color=_USE_DEFAULT):
     """
     Interactively record narration for `source_path`, one take per unique
     narration line, then render with `tts="manual"`.
@@ -1878,7 +2506,11 @@ def record_narration(source_path, manual_audio_dir, out_path, trace=True,
 
     cv = None
     if show_frame:
-        cv = plan_canvas(code_lines, beats1 + beats2, show_panel=trace, subtitles=False)
+        cv = plan_canvas(code_lines, beats1 + beats2, show_panel=trace, subtitles=False,
+                         style=style, bg_color=bg_color,
+                         state_bg_color=state_bg_color,
+                         state_fg_color=state_fg_color,
+                         highlight_color=highlight_color)
 
     device_name = _default_input_device()
     session_dir = tempfile.mkdtemp(prefix="snippet_cast_record_")
@@ -1939,7 +2571,9 @@ def record_narration(source_path, manual_audio_dir, out_path, trace=True,
     if build_after:
         synth = make_manual_backend(manual_audio_dir)
         _render_from_beats(code_lines, beats1, beats2, out_path, "manual", synth,
-                           trace, every, subtitles, typing, typing_speed, pause)
+                           trace, every, subtitles, typing, typing_speed, pause,
+                           style, bg_color, state_bg_color, state_fg_color,
+                           highlight_color)
     return True
 
 
@@ -1978,6 +2612,75 @@ def resolve_env_defaults(args, **fallbacks):
     return args
 
 
+BG_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}\Z")
+BG_COLOR_NONE = "none"   # --bg-color spelling for "use the style's own background"
+STYLE_LIST_ARG = "list"  # --style spelling that prints every valid name and exits
+
+
+def resolve_style_args(style, bg_color, highlight_color=None):
+    """Normalize the raw `--style` / `--bg-color` / `--highlight-color` strings
+    from `main()` or the cell magic into the triple `build()` takes, raising
+    `ValueError` with a listing of valid names on a bad one.
+
+    Shared so both front ends accept exactly the same spellings and reject
+    the same mistakes at parse time. Validating here matters: an unknown
+    style would otherwise surface as a pygments ClassNotFound raised from
+    inside the first frame render (after the trace has already executed the
+    user's snippet), and a malformed color as an even less obvious failure
+    deep in PIL or in _is_light()'s '#rrggbb' slicing.
+
+    `bg_color` is restricted to '#rrggbb' (or BG_COLOR_NONE) rather than the
+    full range of color spellings PIL accepts, because _is_light() parses it
+    by slicing those exact six hex digits to pick readable caption colors."""
+    if isinstance(style, str):
+        if style not in BUILTIN_STYLES and style not in BUILTIN_THEMES:
+            try:
+                get_style_by_name(style)
+            except Exception:
+                if not os.path.isfile(style):
+                    raise ValueError(
+                        f"--style: unknown style {style!r} — expected one of "
+                        f"{', '.join(style_names())}, or a path to a .theme file")
+                try:
+                    load_theme(style)      # fail here, not mid-render
+                except Exception as e:
+                    raise ValueError(f"--style: {style!r} is not a readable "
+                                     f".theme file ({e})")
+    return (style,
+            _hex_color_arg("--bg-color", bg_color,
+                           "to use the style's own background"),
+            _hex_color_arg("--highlight-color", highlight_color,
+                           "to use the style's own highlight color"))
+
+
+def _hex_color_arg(flag, value, none_means):
+    """One raw color string from `main()`/the cell magic -> '#rrggbb' or None.
+
+    BG_COLOR_NONE ('none') maps to None, which each caller reads as its own
+    "no override" default. Only '#rrggbb' is accepted, not the wider set PIL
+    would take, because _is_light() and _mix() both parse a color by slicing
+    those exact six hex digits."""
+    if not isinstance(value, str):
+        return value
+    value = value.strip()
+    if value.lower() == BG_COLOR_NONE:
+        return None
+    if not BG_COLOR_RE.match(value):
+        raise ValueError(f"{flag}: {value!r} is not a '#rrggbb' hex color "
+                         f"(or {BG_COLOR_NONE!r} {none_means})")
+    return value
+
+
+def resolve_panel_args(state_bg_color, state_fg_color):
+    """Validate the raw `--state-bg-color`/`--state-fg-color` strings, as
+    resolve_style_args() does for the code colors. Either may be None (or
+    'none') for "leave the panel's own default" — see _panel_colors()."""
+    return (_hex_color_arg("--state-bg-color", state_bg_color,
+                           "to keep the default panel background"),
+            _hex_color_arg("--state-fg-color", state_fg_color,
+                           "to keep the default panel text colors"))
+
+
 def resolve_output_path(output, output_dir, name):
     """The `-o/--output` path if given, else `output_dir/name.mp4` — and
     makes sure the destination directory exists."""
@@ -1989,7 +2692,7 @@ def resolve_output_path(output, output_dir, name):
 def main():
     """Console-script entry point (`snippet-cast`): parses argv and calls `build`."""
     ap = argparse.ArgumentParser(description="Narrated screencast from an annotated .py snippet.")
-    ap.add_argument("input", help="annotated Python file")
+    ap.add_argument("input", nargs="?", help="annotated Python file")
     ap.add_argument("-o", "--output", default=None, metavar="PATH",
                     help="explicit output MP4 path — overrides -n/--name and "
                          "-d/--output-dir if given")
@@ -2021,9 +2724,33 @@ def main():
     ap.add_argument("--typing-speed", type=float, default=None, metavar="SECONDS",
                     help="seconds to reveal each newly typed character; larger is "
                          f"slower [default: {TYPE_SPEED}; env: SNIPPET_CAST_TYPING_SPEED]")
+    ap.add_argument("--style", default=None, metavar="NAME",
+                    help="syntax highlighting theme: a built-in name "
+                         f"({', '.join(sorted(BUILTIN_STYLES) + sorted(BUILTIN_THEMES))}), "
+                         "any pygments style name, or a path to a Pandoc/KDE "
+                         f".theme file (--style {STYLE_LIST_ARG} prints every name) "
+                         f"[default: {STYLE}; env: SNIPPET_CAST_STYLE]")
+    ap.add_argument("--bg-color", default=None, metavar="HEX",
+                    help="background behind the code and canvas as '#rrggbb', "
+                         f"overriding the style's own; {BG_COLOR_NONE!r} uses the "
+                         f"style's [default: {BG_COLOR}; env: SNIPPET_CAST_BG_COLOR]")
+    ap.add_argument("--highlight-color", default=None, metavar="HEX",
+                    help="band behind the highlighted code line as '#rrggbb', "
+                         f"overriding the style's own; {BG_COLOR_NONE!r} uses "
+                         "the style's [env: SNIPPET_CAST_HIGHLIGHT_COLOR]")
+    ap.add_argument("--state-bg-color", default=None, metavar="HEX",
+                    help="background of the state panel as '#rrggbb'; "
+                         f"{BG_COLOR_NONE!r} keeps the default "
+                         f"[default: {PANEL_BG}; env: SNIPPET_CAST_STATE_BG_COLOR]")
+    ap.add_argument("--state-fg-color", default=None, metavar="HEX",
+                    help="text in the state panel as '#rrggbb' — names and "
+                         "values both, with the header dimmed to match; "
+                         f"{BG_COLOR_NONE!r} keeps the default green-on-white "
+                         "scheme [env: SNIPPET_CAST_STATE_FG_COLOR]")
     ap.add_argument("--pause", type=float, default=None, metavar="SECONDS",
                     help="seconds of silence to hold on each beat's frame after "
                          "its narration finishes, before the next beat begins "
+                         "(in two-pass mode, also between the two passes) "
                          f"[default: {PAUSE_DEFAULT}; env: SNIPPET_CAST_PAUSE]")
     ap.add_argument("--export-script", action=argparse.BooleanOptionalAction, default=None,
                     help="print the ordered, numbered narration script and exit "
@@ -2078,7 +2805,25 @@ def main():
         args, tts="say", no_trace=False, every=False, subtitles=False, typing=False,
         typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT, export_script=False,
         manual_audio_dir=MANUAL_AUDIO_DIR_DEFAULT, record=False, no_frame=False,
-        name="out", output_dir=".")
+        name="out", output_dir=".", style=STYLE,
+        bg_color=BG_COLOR if BG_COLOR else BG_COLOR_NONE,
+        state_bg_color=PANEL_BG, state_fg_color=None,
+        highlight_color=HIGHLIGHT_COLOR)
+    if args.style == STYLE_LIST_ARG:
+        # A listing query, not a render — the one invocation with no input
+        # file, which is why `input` is nargs="?" above. Every other path
+        # still requires it, with argparse's own wording.
+        print("\n".join(style_names()))
+        return
+    if args.input is None:
+        ap.error("the following arguments are required: input")
+    try:
+        args.style, args.bg_color, args.highlight_color = resolve_style_args(
+            args.style, args.bg_color, args.highlight_color)
+        args.state_bg_color, args.state_fg_color = resolve_panel_args(
+            args.state_bg_color, args.state_fg_color)
+    except ValueError as e:
+        sys.exit(str(e))
     if args.tts not in BACKENDS:
         sys.exit(f"--tts: invalid choice {args.tts!r} (choose from {', '.join(BACKENDS)})")
 
@@ -2130,14 +2875,21 @@ def main():
                          trace=not args.no_trace, every=args.every,
                          subtitles=args.subtitles, typing=args.typing,
                          typing_speed=args.typing_speed, pause=args.pause,
-                         show_frame=not args.no_frame)
+                         show_frame=not args.no_frame,
+                         style=args.style, bg_color=args.bg_color,
+                         state_bg_color=args.state_bg_color,
+                         state_fg_color=args.state_fg_color,
+                         highlight_color=args.highlight_color)
         return
 
     build(args.input, out_path, args.tts,
           trace=not args.no_trace, every=args.every,
           subtitles=args.subtitles, typing=args.typing,
           typing_speed=args.typing_speed, pause=args.pause,
-          manual_audio_dir=args.manual_audio_dir)
+          manual_audio_dir=args.manual_audio_dir,
+          style=args.style, bg_color=args.bg_color,
+          state_bg_color=args.state_bg_color, state_fg_color=args.state_fg_color,
+          highlight_color=args.highlight_color)
 
 
 if __name__ == "__main__":

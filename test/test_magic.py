@@ -342,3 +342,89 @@ def test_cell_magic_record_output_goes_through_live_view_not_real_stdout(ip, tmp
     assert "some narration" in html_objs[0].data
     assert "recording — press Enter to stop." in html_objs[-1].data
     assert "\\n" not in html_objs[-1].data  # real newline, not an escaped one
+
+
+def test_cell_magic_accepts_style_and_bg_color(ip, tmp_path, monkeypatch):
+    """--style/--bg-color reach build() from a cell the same way every other
+    option does."""
+    seen = {}
+    monkeypatch.setattr(sc_magic, "build",
+                        lambda *a, **kw: seen.update(kw) or Path(a[1]).touch())
+    out = tmp_path / "out.mp4"
+    result = ip.run_cell(
+        f"%%snippet-cast --tts silent --style nord --bg-color none -o {out}\n"
+        "x = 1 #: Assign one.\n")
+
+    assert result.success
+    assert seen["style"] == "nord"
+    assert seen["bg_color"] is None   # 'none' -> the style's own background
+
+
+def test_cell_magic_reports_clean_error_on_bad_style(ip, capsys):
+    """A bad name must be caught at parse time with a listing, not surface as
+    a pygments ClassNotFound from inside the first frame render (by which
+    point the trace has already executed the user's snippet)."""
+    result = ip.run_cell("%%snippet-cast --style no-such-style\nx = 1 #: One.\n")
+
+    assert result.success  # the magic itself must not raise/crash the cell
+    err = capsys.readouterr().err
+    assert "no-such-style" in err and "monokai" in err
+
+
+def test_cell_magic_reports_clean_error_on_bad_bg_color(ip, capsys):
+    result = ip.run_cell("%%snippet-cast --bg-color chartreuse\nx = 1 #: One.\n")
+
+    assert result.success
+    assert "#rrggbb" in capsys.readouterr().err
+
+
+def test_cell_magic_style_env_vars_are_read_per_cell(ip, tmp_path, monkeypatch):
+    """The env var must be read fresh on every cell run — the whole reason
+    magic.py resolves defaults in the method body instead of in an
+    @argument(default=...), which is evaluated once at import time."""
+    seen = {}
+    monkeypatch.setattr(sc_magic, "build",
+                        lambda *a, **kw: seen.update(kw) or Path(a[1]).touch())
+    monkeypatch.setenv("SNIPPET_CAST_STYLE", "gruvbox-dark")
+    monkeypatch.setenv("SNIPPET_CAST_BG_COLOR", "#101010")
+    out = tmp_path / "out.mp4"
+    result = ip.run_cell(
+        f"%%snippet-cast --tts silent -o {out}\nx = 1 #: Assign one.\n")
+
+    assert result.success
+    assert (seen["style"], seen["bg_color"]) == ("gruvbox-dark", "#101010")
+
+
+def test_cell_magic_accepts_state_colors(ip, tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(sc_magic, "build",
+                        lambda *a, **kw: seen.update(kw) or Path(a[1]).touch())
+    out = tmp_path / "out.mp4"
+    result = ip.run_cell(
+        f"%%snippet-cast --tts silent --state-bg-color #0d1117 "
+        f"--state-fg-color #9CDCFE -o {out}\nx = 1 #: Assign one.\n")
+
+    assert result.success
+    assert seen["state_bg_color"] == "#0d1117"
+    assert seen["state_fg_color"] == "#9CDCFE"
+
+
+def test_cell_magic_reports_clean_error_on_bad_state_color(ip, capsys):
+    result = ip.run_cell("%%snippet-cast --state-fg-color chartreuse\nx = 1 #: One.\n")
+
+    assert result.success  # the magic itself must not raise/crash the cell
+    err = capsys.readouterr().err
+    assert "--state-fg-color" in err and "#rrggbb" in err
+
+
+def test_cell_magic_state_color_env_vars_are_read_per_cell(ip, tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(sc_magic, "build",
+                        lambda *a, **kw: seen.update(kw) or Path(a[1]).touch())
+    monkeypatch.setenv("SNIPPET_CAST_STATE_BG_COLOR", "#222233")
+    monkeypatch.setenv("SNIPPET_CAST_STATE_FG_COLOR", "#DCDCAA")
+    out = tmp_path / "out.mp4"
+    result = ip.run_cell(f"%%snippet-cast --tts silent -o {out}\nx = 1 #: One.\n")
+
+    assert result.success
+    assert (seen["state_bg_color"], seen["state_fg_color"]) == ("#222233", "#DCDCAA")

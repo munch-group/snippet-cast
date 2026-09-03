@@ -36,6 +36,11 @@ jupyter = ["ipython"]
 [tool.setuptools]
 include-package-data = true
 
+[tool.setuptools.package-data]
+# Shipped .theme files (BUILTIN_THEMES) must land in the wheel/sdist, so
+# --style numpy works from an install, not just a checkout.
+snippet_cast = ["themes/*.theme"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 exclude = ["test*"]
