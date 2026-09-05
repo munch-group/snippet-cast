@@ -137,6 +137,12 @@ USAGE (installed console script):
     snippet-cast input.py -o out.mp4 --typing        # type each new line in
     snippet-cast input.py -o out.mp4 --typing --typing-speed 0.06  # slower typing
     snippet-cast input.py -o out.mp4 --pause 0.6     # breathing gap between beats
+    snippet-cast plain.py -o out.mp4 --pause 2.0     # NO '#:' at all: one silent
+                                                     # 2s frame per code line, to
+                                                     # narrate later in an editor
+    snippet-cast input.py -o out.mp4 --font-size 40              # bigger text
+    snippet-cast input.py -o out.mp4 --screenflow               # 1920x1080, centred
+    snippet-cast input.py -o out.mp4 --screenflow 1280x720      # any frame size
     snippet-cast input.py -o out.mp4 --style github-dark        # syntax theme
     snippet-cast --style list                                   # list all themes
     snippet-cast input.py -o out.mp4 --style light-modern --bg-color none
@@ -218,16 +224,25 @@ BG_COLOR = None         # background behind BOTH the code and the whole canvas,
                         # which is what lets the default light theme through.
                         # Overridable per run with --bg-color / SNIPPET_CAST_
                         # BG_COLOR / build(bg_color=).
-HIGHLIGHT_COLOR = None  # band behind the highlighted code line, overriding
-                        # STYLE's own highlight_color. None = use the style's
-                        # (pygments' unset default is a pale "#ffffcc", which
-                        # is why DarkModernStyle needs one passed). Overridable
+HIGHLIGHT_PANEL = "panel"   # --highlight-color spelling for "match PANEL_BG /
+                            # --state-bg-color", so the band behind the current
+                            # line and the STATE box read as one surface
+HIGHLIGHT_COLOR = HIGHLIGHT_PANEL  # band behind the highlighted code line, overriding
+                        # STYLE's own highlight_color. HIGHLIGHT_PANEL (the
+                        # shipped default) tracks the STATE panel background,
+                        # so the two surfaces match and a --state-bg-color
+                        # change carries the band with it; None = use the
+                        # style's own (pygments' unset default is a pale
+                        # "#ffffcc", which is why DarkModernStyle needs one
+                        # passed). Overridable
                         # with --highlight-color / SNIPPET_CAST_HIGHLIGHT_COLOR
                         # / build(highlight_color=).
 FONT_NAME = "DejaVu Sans Mono"
 FONT_SIZE = 26
 PANEL_FONT_SIZE = FONT_SIZE  # state-panel name/value text — mirrors the code font
                              # size by default; header is PANEL_FONT_SIZE - 8
+FONT_SIZE_MIN = 6            # floor for --font-size; pygments/PIL need a real size
+SCREENFLOW_SIZE = "1920x1080"  # --screenflow's target canvas when given no WxH of its own
 FPS = 30
 WORDS_PER_SEC = 2.6     # only used by the 'silent' backend to fake durations
 LINE_PAD = 6            # px of vertical breathing room added to each code row
@@ -252,9 +267,20 @@ COL_CAPTION = "#e8e8e8"       # caption text on a dark STYLE background
 COL_RULE = "#3a3b36"          # rule above the caption band on a dark STYLE background
 COL_CAPTION_LIGHT = "#2b2b2b" # caption text on a light STYLE background
 COL_RULE_LIGHT = "#d0d0d0"    # rule above the caption band on a light STYLE background
-TYPE_SPEED = 0.15       # default seconds to reveal each new character in --typing mode
-TYPE_MAXFRAMES = 150    # absolute cap on typing frames per beat, so a slow speed
-                        # or a very long line can't blow a beat up unboundedly
+TYPE_SPEED = 0.1        # default seconds to reveal each new character — used by
+                        # BOTH legacy --typing (typing_frames) and two-pass
+                        # mode's writing pass (make_pass1_code_clip), which is
+                        # why there is only ever one constant to change here
+TYPE_MAXFRAMES = 450    # absolute cap on typing frames per beat, so a slow speed
+                        # or a very long line can't blow a beat up unboundedly.
+                        # Note this bounds the speed that can actually be
+                        # DELIVERED: at FPS=30 a beat types at most
+                        # TYPE_MAXFRAMES/FPS = 15s, so a group longer than
+                        # 15/TYPE_SPEED characters (150 at the default) is
+                        # compressed to fit rather than paced at TYPE_SPEED.
+                        # Chosen to cover a 150-char line at TYPE_SPEED; the
+                        # guard still bites on a deliberately slow
+                        # --typing-speed (e.g. 2s/char clamps to 15s a beat)
 TWO_PASS_SEP = "/"      # splits a #: narration into "writing pass / walkthrough pass"
 PART2_EMPTY_HOLD = 0.8  # seconds to hold a walkthrough-pass beat with no narration
 PAUSE_DEFAULT = 0.8     # default seconds of silence held on each beat after its narration
@@ -440,6 +466,35 @@ def parse(source: str):
     return code_lines, markers
 
 
+def _auto_markers(code_lines):
+    """Markers for a snippet that carries no `#:` narration at all: one
+    empty-narration Marker per code line, so the normal first-exec/every-exec
+    machinery still produces a beat sequence. Used only when the caller opted
+    in (build(allow_unnarrated=True), i.e. an explicit --pause) — the point is
+    a silent, evenly paced video to narrate later in a video editor, so every
+    beat's clip is just its frame held for `pause` seconds and nothing is ever
+    synthesized (see _render_from_beats).
+
+    Comment-only lines deliberately get NO marker of their own: _reveal_groups()
+    already reveals an unmarked line together with the next marked one, so a
+    comment appears with the code it describes instead of costing a beat that
+    would blank the state panel (a comment line has no trace Step). The last
+    non-blank line is the exception — it always gets a marker, because lines
+    after the final marker are never revealed at all, so a trailing comment
+    block would otherwise stay invisible for the whole video."""
+    markers, last = [], 0
+    for i, raw in enumerate(code_lines, start=1):
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        last = i
+        if not stripped.startswith("#"):
+            markers.append(Marker(i, "", has_code=True))
+    if last and (not markers or markers[-1].line_no != last):
+        markers.append(Marker(last, "", has_code=False))
+    return markers
+
+
 # ---------------------------------------------------------------------------
 # Execution trace: run the snippet once under sys.settrace and record, in
 # completion order, EVERY execution of every line. For each execution we snapshot
@@ -454,6 +509,14 @@ class Step:
     disp: dict          # {name: repr-string, truncated}  -> panel
     text: dict          # {name: str(value)}              -> interpolation
     frame_id: int       # id() of the frame, to find the next step in same scope
+    call_entry: bool = False   # synthesized at a 'call' event rather than a
+                               # line completion: the parameters as just bound,
+                               # attached to the `def` line. Consumed ONLY by
+                               # first-exec's `first` map (see build_beats) —
+                               # these locals belong to the CALLEE's frame, so
+                               # letting them into env_before() would report
+                               # them as the caller's scope, and letting them
+                               # into --every would add a beat per call.
 
 
 def _fmt_value(v):
@@ -508,7 +571,19 @@ def trace_run(source, filename):
     def tracer(frame, event, arg):
         if frame.f_code.co_filename != filename:
             return tracer                # ignore library frames
-        if event == "line":
+        if event == "call":
+            # Entering a function: its locals are exactly the arguments as
+            # just bound, and the natural line to show them against is the
+            # `def` header — which otherwise only ever gets the module-level
+            # step from executing the `def` STATEMENT (whose post-state has
+            # no parameters in it at all). co_name filters out frames with no
+            # `def` line of their own: "<module>", "<listcomp>", "<genexpr>",
+            # "<dictcomp>", "<lambda>".
+            if not frame.f_code.co_name.startswith("<"):
+                disp, text = _snapshot(frame)
+                steps.append(Step(frame.f_code.co_firstlineno, disp, text,
+                                  id(frame), call_entry=True))
+        elif event == "line":
             close(frame)
             pending[id(frame)] = frame.f_lineno
         elif event == "return":
@@ -626,13 +701,26 @@ def order_markers(markers, texts):
 def _footnote_comment(label, head, body):
     """The '#: ...' comment one footnote line is rewritten to: `body` (the
     second occurrence's text) appended to `head` (the first's own text, often
-    empty), joined PER PASS so a '/' on either side keeps its meaning."""
+    empty), joined PER PASS so a '/' on either side keeps its meaning.
+
+    A separator on EITHER side makes this a two-pass narration, and the
+    re-emitted line has to keep one even when pass 1 comes out empty — e.g.
+    a reference reading `#: 3) /` whose body block carries only walkthrough
+    text. Dropping it there (the old `if part1:` test) silently rewrote
+    `3) /` + `Start from...` to `3) Start from...`, which re-parses as an
+    UNnumbered pass 1 and a pass 2 numbered 3 — the label jumping passes.
+    In a file whose walkthrough pass is otherwise unnumbered that trips
+    order_markers()'s all-or-none check, so a footnote that was written
+    exactly like its neighbours failed with a mix-of-numbering error. The
+    label still goes on the pass-1 side only, so the result stays textually
+    identical to having typed the body inline after the `N)`."""
     h1, h2 = split_narration(head)
     b1, b2 = split_narration(body)
     part1 = " ".join(p for p in (h1, b1) if p)
     part2 = " ".join(p for p in (h2, b2) if p)
-    if part1:
-        return f"{MARKER} {label}) {part1} {TWO_PASS_SEP} {part2}"
+    if part1 or TWO_PASS_SEP in head or TWO_PASS_SEP in body:
+        head_side = f"{label}) {part1}".rstrip()
+        return f"{MARKER} {head_side} {TWO_PASS_SEP} {part2}".rstrip()
     return f"{MARKER} {label}) {part2}"
 
 
@@ -782,13 +870,56 @@ def _panel_colors(state_bg=None, state_fg=None):
                        name=state_fg, value=state_fg)
 
 
-def render_panel(vars_dict, width, height, colors=None):
+@dataclass
+class FontSizes:
+    """Every text size one frame draws with, resolved once (Canvas.fonts) so
+    all of a video's frames agree — the same 'resolve once, every frame draws
+    from it' rule as Canvas.style/Canvas.panel (critical invariant 13).
+    Always built through _font_sizes(), never constructed field-by-field: the
+    fields are deliberately given no defaults, so a size can't silently freeze
+    the module constants as they stood at IMPORT time (which would ignore a
+    later `sc.FONT_SIZE = 40` — a documented way to change the size from a
+    notebook)."""
+    code: int
+    panel: int
+    caption: int
+    panel_header: int
+
+
+def _font_sizes(font_size=None):
+    """Resolve `--font-size` into the four sizes one frame uses.
+
+    `font_size` sets the CODE size; every other size keeps the OFFSET it has
+    from FONT_SIZE in the module constants, so the frame scales as one piece
+    and a `PANEL_FONT_SIZE` deliberately edited to differ from `FONT_SIZE`
+    stays that much apart instead of being flattened back to a mirror. With
+    the shipped `PANEL_FONT_SIZE = FONT_SIZE` that offset is 0, so the panel
+    simply matches the code.
+
+    `None` — and, equivalently, exactly `FONT_SIZE` — reproduces the
+    constants unchanged, so a render that says nothing about fonts is
+    identical to before this option existed.
+
+    The readability floors (14 for the caption, 12 for the panel header) are
+    the ones those expressions always carried, now also capped at the size
+    they are subordinate to — otherwise a tiny --font-size would leave the
+    caption LARGER than the code it captions. Identical to the bare floor for
+    every size from 14 up, i.e. everywhere the old constants could reach."""
+    code = FONT_SIZE if font_size is None else max(FONT_SIZE_MIN, int(font_size))
+    panel = max(FONT_SIZE_MIN, PANEL_FONT_SIZE + (code - FONT_SIZE))
+    return FontSizes(code=code, panel=panel,
+                     caption=min(code, max(14, code - 4)),
+                     panel_header=min(panel, max(12, panel - 8)))
+
+
+def render_panel(vars_dict, width, height, colors=None, fonts=None):
     """A fixed-size 'state' panel listing name = value pairs."""
     colors = colors or PanelColors()
+    fonts = fonts or _font_sizes()
     img = Image.new("RGB", (width, height), colors.bg)
     d = ImageDraw.Draw(img)
-    font = _mono_font(PANEL_FONT_SIZE)
-    head = _mono_font(max(12, PANEL_FONT_SIZE - 8))
+    font = _mono_font(fonts.panel)
+    head = _mono_font(fonts.panel_header)
     asc, desc = font.getmetrics()
     lh = asc + desc + 8
     x, y = PANEL_PAD, PANEL_PAD
@@ -860,19 +991,32 @@ def build_beats(code_lines, markers, steps, every, loop_ranges=None):
     loop_ranges = loop_ranges or {}
     code_marks = {m.line_no: m for m in markers if m.has_code}
     comment_marks = [m for m in markers if not m.has_code]
+    # Call-entry steps describe the CALLEE's freshly-bound parameters, not the
+    # scope the line sits in, so only the first-exec `first` map below wants
+    # them: env_before() would misreport them as the caller's state, and
+    # --every would gain a beat per call.
+    line_steps = [st for st in steps if not st.call_entry]
 
     def env_before(line_no):
         """Values from the last step that ran on a source line above this one."""
         env = {}
-        for st in steps:
+        for st in line_steps:
             if st.line_no < line_no:
                 env = st.text
         return env
 
     if not every:
-        first = {}  # line_no -> first Step for that line
+        first = {}  # line_no -> the Step whose state that line's beat shows
         for st in steps:
-            first.setdefault(st.line_no, st)
+            prev = first.get(st.line_no)
+            # A `def` line has two steps: executing the def STATEMENT (module
+            # scope, no parameters) and entering the call (the parameters as
+            # bound). Prefer the latter, so highlighting `def f(n):` shows
+            # `n = 7` instead of an empty panel — the def statement's own
+            # post-state is never what a walkthrough is talking about. First
+            # call wins, so a second call can't overwrite it.
+            if prev is None or (st.call_entry and not prev.call_entry):
+                first[st.line_no] = st
         groups = _reveal_groups(code_lines, markers)
         beats = []
         revealed = frozenset()   # markers may be given out of source order
@@ -895,6 +1039,7 @@ def build_beats(code_lines, markers, steps, every, loop_ranges=None):
         return beats
 
     # every-execution mode: drive beats from the trace, full code always shown.
+    steps = line_steps          # call-entry steps add no beat of their own here
     exec_beats = []
     for idx, st in enumerate(steps):
         m = code_marks.get(st.line_no)
@@ -936,10 +1081,32 @@ def _two_pass_beats(code_lines, markers, steps):
     Each pass may independently carry a leading 'N) ' order prefix on every
     one of its texts (order_markers()) — e.g. '#: 1) text / 4) text' — to
     narrate that pass out of source-line order; a bare '#: text / 4) text'
-    leaves pass 1 in default (top-to-bottom) order while pass 2 is reordered."""
+    leaves pass 1 in default (top-to-bottom) order while pass 2 is reordered.
+
+    A walkthrough pass carrying NO numbering of its own INHERITS the writing
+    pass's order instead of falling back to source order. `#: 2) Write it /
+    Explain it` is the ordinary way to write this — the number is naturally
+    put once, on the pass that has one — and having only pass 1 honor it made
+    the video jump around while writing and then march top-to-bottom while
+    explaining. Ordering is still resolved per pass, so numbering pass 2
+    explicitly ('/ 4) text') overrides the inheritance, and a file numbering
+    neither pass is untouched.
+
+    Note this is an ORDER-level inheritance, not a text rewrite: pass 2's
+    texts stay unnumbered, so order_markers() never sees a mix and its
+    all-or-none check is unaffected. (Re-attaching the label to pass 2's TEXT
+    was tried once and was a real bug — it forced the walkthrough to be
+    numbered, so a single footnote in an otherwise unnumbered walkthrough
+    tripped that check. See resolve_footnotes()/CLAUDE.md.)"""
     parts = [split_narration(m.text) for m in markers]
-    m1 = order_markers(markers, [p[0] for p in parts])
-    m2 = order_markers(markers, [p[1] for p in parts])
+    texts1 = [p[0] for p in parts]
+    texts2 = [p[1] for p in parts]
+    m1 = order_markers(markers, texts1)
+    m2 = order_markers(markers, texts2)
+    if (any(_parse_order(t)[0] is not None for t in texts1)
+            and all(_parse_order(t)[0] is None for t in texts2)):
+        rank = {m.line_no: i for i, m in enumerate(m1)}
+        m2 = sorted(m2, key=lambda m: rank[m.line_no])
     beats1 = build_beats(code_lines, m1, steps=[], every=False)
     beats2 = build_beats(code_lines, m2, steps=steps, every=False)
     return beats1, beats2
@@ -949,11 +1116,15 @@ def _two_pass_beats(code_lines, markers, steps):
 # Frame rendering: render onto a fixed-size canvas so every frame shares one
 # resolution (required for clean concat).
 # ---------------------------------------------------------------------------
-def _render_code(code: str, hl_lines, style=None):
+def _render_code(code: str, hl_lines, style=None, font_size=None):
     """`style` is an ALREADY-RESOLVED pygments Style subclass (Canvas.style,
     i.e. _resolve_style()'s output, background override included). None
     resolves from the STYLE/BG_COLOR globals — only for standalone use; every
-    render path passes the canvas's own style so one video can't mix two."""
+    render path passes the canvas's own style so one video can't mix two.
+    `font_size` is likewise the already-resolved code size (Canvas.fonts.code);
+    None means FONT_SIZE. Both must come from the canvas on every real render:
+    a per-frame re-resolve could let one video mix two sizes, and a size the
+    canvas was not measured at overflows it (critical invariant 1)."""
     if not code.strip():
         code = " "  # PIL cannot encode a zero-size image
     # Prefer a concrete font *file* over FONT_NAME's by-name OS lookup: pygments'
@@ -963,7 +1134,8 @@ def _render_code(code: str, hl_lines, style=None):
     if style is None:
         style = _resolve_style()
     fmt = ImageFormatter(
-        font_name=_mono_font_path() or FONT_NAME, font_size=FONT_SIZE,
+        font_name=_mono_font_path() or FONT_NAME,
+        font_size=FONT_SIZE if font_size is None else font_size,
         style=style, line_numbers=False, hl_lines=hl_lines,
         image_pad=0, line_pad=LINE_PAD,
     )
@@ -1073,7 +1245,7 @@ def _wrap(text, font, max_w):
 
 @dataclass
 class Canvas:
-    W: int
+    W: int               # full frame — equals cw/ch unless --screenflow padded it
     H: int
     code_w: int
     code_h: int
@@ -1086,6 +1258,16 @@ class Canvas:
     style: type = None   # resolved pygments Style (background override applied),
                          # so every frame of one video renders from the same one
     panel: object = None # resolved PanelColors, same reason
+    fonts: object = None # resolved FontSizes, same reason
+    # The content block (code + panel, with the caption band under it) and its
+    # top-left corner within the frame. Without --screenflow these are just
+    # (W, H) at (0, 0); with it, the frame is the padded-out target and the
+    # block is centred inside it. Everything positional draws off these, never
+    # off W/H, so letterboxing never stretches the layout to the frame edges.
+    cw: int = 0
+    ch: int = 0
+    off_x: int = 0
+    off_y: int = 0
 
 
 @functools.lru_cache(maxsize=None)
@@ -1108,7 +1290,8 @@ def _with_colors(style, bg, hl):
     return type(f"{style.__name__}Recolored", (style,), over)
 
 
-def _resolve_style(style=None, bg_color=_USE_DEFAULT, hl_color=_USE_DEFAULT):
+def _resolve_style(style=None, bg_color=_USE_DEFAULT, hl_color=_USE_DEFAULT,
+                   panel_bg=None):
     """`style` may be a registered pygments style name, a BUILTIN_STYLES key,
     or a Style subclass passed directly (pygments.formatter.Formatter accepts
     a name or a class already — see ImageFormatter's `style=` in
@@ -1123,7 +1306,18 @@ def _resolve_style(style=None, bg_color=_USE_DEFAULT, hl_color=_USE_DEFAULT):
     `bg_color` and `hl_color`, if truthy, override the resolved style's own
     background_color / highlight_color; `None` means "no override, use the
     style's own", and the _USE_DEFAULT sentinel means "caller said nothing"
-    -> the BG_COLOR / HIGHLIGHT_COLOR global. The overrides live here rather
+    -> the BG_COLOR / HIGHLIGHT_COLOR global.
+
+    `hl_color` has one extra spelling, HIGHLIGHT_PANEL, which is the shipped
+    HIGHLIGHT_COLOR default: it means "whatever the STATE panel background
+    resolved to", so the band behind the current line and the STATE box are
+    one surface and a --state-bg-color change carries the band along.
+    `panel_bg` is that resolved background — plan_canvas() resolves the panel
+    FIRST and passes it, so per-run --state-bg-color is honored; it falls
+    back to the PANEL_BG global for standalone callers that have no canvas.
+    Substituting here (rather than at the call sites) keeps this the single
+    choke point, and makes the call idempotent: a concrete color passed in
+    is returned unchanged. The overrides live here rather
     than at the call sites because this is the one choke point every consumer
     shares — plan_canvas()'s canvas fill, _render_code()'s pygments-rendered
     code block, and _tighten_highlight()'s band. Applying one to only some of
@@ -1135,6 +1329,8 @@ def _resolve_style(style=None, bg_color=_USE_DEFAULT, hl_color=_USE_DEFAULT):
         bg_color = BG_COLOR
     if hl_color is _USE_DEFAULT:
         hl_color = HIGHLIGHT_COLOR
+    if hl_color == HIGHLIGHT_PANEL:
+        hl_color = panel_bg or PANEL_BG
     if isinstance(style, str):
         style = _style_by_name(style)
     return _with_colors(style, bg_color, hl_color)
@@ -1240,7 +1436,6 @@ def _theme_token_style(entry):
     return " ".join(parts)
 
 
-@functools.lru_cache(maxsize=None)
 def load_theme(path):
     """Build a pygments `Style` subclass from a KSyntaxHighlighting/Pandoc
     `.theme` JSON file.
@@ -1254,9 +1449,34 @@ def load_theme(path):
     field for it and pygments' unset default is a pale `#ffffcc` that reads
     badly on most backgrounds. `--highlight-color` overrides it.
 
-    Cached on the path: _render_code() resolves the style once per frame, and
-    re-reading and re-classing the file each time would be wasteful (and each
-    fresh class would defeat _with_colors()' own cache)."""
+    Cached on the path AND the file's mtime/size: _render_code() resolves the
+    style once per frame, so re-reading and re-classing the file each time
+    would be wasteful (and each fresh class would defeat _with_colors()' own
+    cache) — but keying on the path alone made an edited theme invisible for
+    the life of the process. That is barely noticeable for a one-shot CLI run
+    and very noticeable in a Jupyter kernel, where every later
+    `%%snippet-cast` in the session kept rendering the theme as it was when
+    the kernel first read it, with a restart the only way out. The stat is
+    cheap next to a frame render, and cannot change mid-render."""
+    return _load_theme(path, _theme_stamp(path))
+
+
+def _theme_stamp(path):
+    """(mtime, size) of `path`, or None if it cannot be stat'd — the cache key
+    that lets load_theme() notice an edited theme. Size is in there because
+    mtime alone has coarse resolution on some filesystems, so two edits within
+    the same tick could otherwise collide."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime, st.st_size)
+
+
+@functools.lru_cache(maxsize=None)
+def _load_theme(path, _stamp):
+    """load_theme()'s cached body — `_stamp` is part of the key only, so an
+    edit to the file produces a fresh entry rather than a stale hit."""
     with open(path) as fh:
         theme = json.load(fh)
     bg = theme.get("background-color") or "#ffffff"
@@ -1295,22 +1515,39 @@ def _is_light(hex_color):
 def plan_canvas(code_lines, beats, show_panel, subtitles,
                 style=None, bg_color=_USE_DEFAULT,
                 state_bg_color=None, state_fg_color=None,
-                highlight_color=_USE_DEFAULT):
-    """Fix the canvas dimensions (and colors) every frame of one video shares.
-    `style`/`bg_color` and the two `state_*_color`s are resolved exactly once,
-    here, and carried on the returned Canvas — see _resolve_style() and
-    _panel_colors() for what each accepts."""
-    style = _resolve_style(style, bg_color, highlight_color)
+                highlight_color=_USE_DEFAULT, font_size=None, screenflow=None):
+    """Fix the canvas dimensions (and colors, and text sizes) every frame of
+    one video shares. `style`/`bg_color`, the two `state_*_color`s and
+    `font_size` are resolved exactly once, here, and carried on the returned
+    Canvas — see _resolve_style(), _panel_colors() and _font_sizes() for what
+    each accepts. Text size has to be resolved here in particular because it
+    is what the canvas is MEASURED at: a frame drawn at any other size would
+    not fit the dimensions this returns (critical invariant 1).
+
+    `screenflow` is an already-parsed `(width, height)` from
+    resolve_screenflow_arg(): the natural content-sized canvas is measured
+    first, exactly as without it, and only then padded out to that frame with
+    the content centred (Canvas.cw/ch/off_x/off_y). Measuring first is what
+    keeps caption wrapping — and therefore the caption band's height —
+    identical to the unpadded render instead of re-flowing to the wider
+    frame."""
+    # Panel first: the shipped --highlight-color default (HIGHLIGHT_PANEL)
+    # resolves to whatever the panel background ends up being, so the band
+    # behind the current line matches the STATE box even when the caller
+    # moved it with --state-bg-color.
     panel = _panel_colors(state_bg_color, state_fg_color)
+    style = _resolve_style(style, bg_color, highlight_color, panel_bg=panel.bg)
+    fonts = _font_sizes(font_size)
     bg = style.background_color or "#000000"
     cap_fg, cap_rule = (COL_CAPTION_LIGHT, COL_RULE_LIGHT) if _is_light(bg) \
         else (COL_CAPTION, COL_RULE)
-    full = _render_code("\n".join(code_lines), hl_lines=[], style=style)
+    full = _render_code("\n".join(code_lines), hl_lines=[], style=style,
+                        font_size=fonts.code)
     code_w, code_h = full.width, full.height
 
     panel_w = 0
     if show_panel:
-        font = _mono_font(PANEL_FONT_SIZE)
+        font = _mono_font(fonts.panel)
         meas = ImageDraw.Draw(Image.new("RGB", (1, 1)))
         longest = max(
             (meas.textlength(f"{n} = {v}", font=font)
@@ -1318,7 +1555,7 @@ def plan_canvas(code_lines, beats, show_panel, subtitles,
         panel_w = int(max(240, longest + 2 * PANEL_PAD))
 
         # The panel is drawn into an image exactly `code_h` tall (see
-        # compose()); with a larger PANEL_FONT_SIZE a beat with many state
+        # compose()); with a larger panel font a beat with many state
         # variables and few code lines could need more room than the code
         # column provides, so grow code_h (and the overall canvas) to fit —
         # never shrink the code column, only ever tall enough for both.
@@ -1332,7 +1569,7 @@ def plan_canvas(code_lines, beats, show_panel, subtitles,
 
     captions, cap_h = None, 0
     if subtitles:
-        cfont = _mono_font(max(14, FONT_SIZE - 4))
+        cfont = _mono_font(fonts.caption)
         asc, desc = cfont.getmetrics()
         clh = asc + desc + CAP_GAP
         wrap_w = W - 2 * PAD
@@ -1341,31 +1578,66 @@ def plan_canvas(code_lines, beats, show_panel, subtitles,
         cap_h = 2 * CAP_PAD + max_lines * clh
 
     H = _even(PAD + code_h + PAD + cap_h)
+
+    # --screenflow: keep the content block at its natural size (text stays
+    # crisp — nothing is ever scaled) and centre it in the requested frame.
+    off_x = off_y = 0
+    cw, ch = W, H
+    if screenflow:
+        tw, th = screenflow
+        if W > tw or H > th:
+            fits = max(FONT_SIZE_MIN,
+                       int(fonts.code * min(tw / W, th / H)))
+            raise ValueError(
+                f"--screenflow {tw}x{th} is too small for this snippet: it "
+                f"needs {W}x{H}. Try --font-size {fits} or smaller, drop "
+                f"--subtitles/--state panel, or ask for a larger frame.")
+        off_x, off_y = (tw - W) // 2, (th - H) // 2
+        W, H = tw, th
     return Canvas(W, H, code_w, code_h, panel_w, cap_h, bg, captions,
-                  cap_fg, cap_rule, style, panel)
+                  cap_fg, cap_rule, style, panel, fonts, cw, ch, off_x, off_y)
+
+
+def _plan_canvas_or_exit(*args, **kwargs):
+    """plan_canvas() with its --screenflow "doesn't fit" ValueError turned
+    into a clean exit. Unlike the other look options, this one cannot be
+    validated at parse time: it depends on the measured canvas, which needs
+    the beats, which needs trace_run() to have already run."""
+    try:
+        return plan_canvas(*args, **kwargs)
+    except ValueError as e:
+        sys.exit(str(e))
 
 
 def _draw_caption(canvas, cv, lines):
     d = ImageDraw.Draw(canvas)
-    top = cv.H - cv.cap_h
-    d.line([(PAD, top), (cv.W - PAD, top)], fill=cv.cap_rule, width=2)
-    cfont = _mono_font(max(14, FONT_SIZE - 4))
+    # Positioned within the CONTENT BLOCK, not the frame: with --screenflow the
+    # frame is larger, and the caption belongs under the code it captions
+    # rather than pinned to the bottom edge of the letterbox.
+    left, width = cv.off_x, cv.cw or cv.W
+    top = cv.off_y + (cv.ch or cv.H) - cv.cap_h
+    d.line([(left + PAD, top), (left + width - PAD, top)],
+           fill=cv.cap_rule, width=2)
+    cfont = _mono_font((cv.fonts or _font_sizes()).caption)
     asc, desc = cfont.getmetrics()
     clh = asc + desc + CAP_GAP
     y = top + CAP_PAD
     for ln in lines:
         w = d.textlength(ln, font=cfont)
-        d.text(((cv.W - w) / 2, y), ln, font=cfont, fill=cv.cap_fg)
+        d.text((left + (width - w) / 2, y), ln, font=cfont, fill=cv.cap_fg)
         y += clh
 
 
 def compose(cv, code_text, hl_lines, state, caption_lines, path):
     """Render one full frame onto the fixed canvas and save it."""
+    fonts = cv.fonts or _font_sizes()
     canvas = Image.new("RGB", (cv.W, cv.H), cv.bg)
-    canvas.paste(_render_code(code_text, hl_lines=hl_lines, style=cv.style), (PAD, PAD))
+    ox, oy = cv.off_x, cv.off_y            # 0, 0 unless --screenflow centred it
+    canvas.paste(_render_code(code_text, hl_lines=hl_lines, style=cv.style,
+                              font_size=fonts.code), (ox + PAD, oy + PAD))
     if cv.panel_w:
-        canvas.paste(render_panel(state, cv.panel_w, cv.code_h, cv.panel),
-                     (PAD + cv.code_w + GAP, PAD))
+        canvas.paste(render_panel(state, cv.panel_w, cv.code_h, cv.panel, fonts),
+                     (ox + PAD + cv.code_w + GAP, oy + PAD))
     if caption_lines is not None:
         _draw_caption(canvas, cv, caption_lines)
     canvas.save(path)
@@ -1605,8 +1877,25 @@ def make_pause_clip(frame, duration, out):
 
 def make_typing_clip(frames_dir, n_frames, out, audio=None):
     """A clip from a PNG sequence (dir/000.png …) at FPS, muxed with `audio`
-    (a real narration file) or silence if `audio` is None."""
-    audio_in = ["-i", audio] if audio else ["-f", "lavfi", "-i", f"anullsrc=r={AUDIO_AR}:cl=stereo"]
+    (a real narration file) or silence if `audio` is None.
+
+    The clip always lasts the FULL frame sequence. With no `audio` that falls
+    out of `anullsrc` being endless, so `-shortest` lands on the video; with a
+    real narration file `apad` extends it with silence so it lands on the
+    video there too. Without that pad, `-shortest` ended the clip the moment
+    the narration did and simply dropped the remaining frames — a line whose
+    typing needed longer than its narration stopped mid-word, and the next
+    clip's fully-typed frame made the rest look typed in an instant. Typing
+    now runs to completion at `typing_speed` and the narration is followed by
+    silence.
+
+    This never truncates narration (CLAUDE.md invariant 10): callers muxing
+    real audio size the sequence to at least `ceil(duration * FPS)` frames
+    first (see make_pass1_code_clip), so the video is the longer stream."""
+    if audio:
+        audio_in = ["-i", audio, "-af", "apad"]
+    else:
+        audio_in = ["-f", "lavfi", "-i", f"anullsrc=r={AUDIO_AR}:cl=stereo"]
     subprocess.run(
         ["ffmpeg", "-y", "-framerate", str(FPS),
          "-i", os.path.join(frames_dir, "%03d.png"), *audio_in,
@@ -1634,9 +1923,13 @@ def make_pass1_code_clip(cv, code_lines, revealed_before, new_group, caption_lin
     CLAUDE.md invariant 10) without slowing the reveal below the requested
     typing_speed just to stretch it across the whole narration. If
     typing_speed would need MORE time than `duration` provides (a slow
-    --typing-speed paired with brief narration), the reveal is — same as
-    before this fix — cut short by make_typing_clip's -shortest at the real
-    audio length; narration itself is still never truncated. Returns None
+    --typing-speed paired with brief narration), the reveal now runs to
+    completion anyway and the narration is followed by silence — see
+    make_typing_clip's `apad`. It used to be cut short there by `-shortest`
+    at the audio length, which stopped the typing mid-word and let the next
+    clip's fully-typed frame make the rest look typed in one jump. So the
+    clip is always max(typed reveal, narration) long, and narration itself
+    is still never truncated. Returns None
     if the group's joined text has < 2 characters (nothing worth animating
     — caller falls back to a static hold)."""
     stream = "\n".join(code_lines[i - 1] for i in new_group)
@@ -1898,18 +2191,34 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
     return clips
 
 
-def _build_all_beats(source_path, trace, every):
+def _build_all_beats(source_path, trace, every, allow_unnarrated=False):
     """Shared parse -> two-pass-detect -> validate -> trace -> beats
     preamble used by build(), export_script(), and record_narration().
-    Returns (code_lines, beats1, beats2): beats1 is the two-pass 'writing'
-    pass (empty list for a file with no '/' narration split), beats2 is
-    either the two-pass 'walkthrough' pass or, for a non-two-pass file,
-    the complete single-pass beat sequence. `bool(beats1)` tells a caller
-    whether two-pass mode was used."""
+    Returns (code_lines, beats1, beats2, unnarrated): beats1 is the two-pass
+    'writing' pass (empty list for a file with no '/' narration split),
+    beats2 is either the two-pass 'walkthrough' pass or, for a non-two-pass
+    file, the complete single-pass beat sequence. `bool(beats1)` tells a
+    caller whether two-pass mode was used.
+
+    `allow_unnarrated` turns a snippet with no `#:` comments at all from an
+    error into an auto-generated, silent beat sequence (_auto_markers());
+    `unnarrated` reports whether that happened, so the renderer knows to hold
+    each frame for `pause` seconds instead of synthesizing anything. Only
+    build() opts in (on an explicit --pause) — --export-script and --record
+    exist to produce/record narration, so a file with none is still an error
+    there."""
     source = resolve_footnotes(open(source_path).read())
     code_lines, markers = parse(source)
+    unnarrated = False
     if not markers:
-        sys.exit(f"No narration found. Add trailing '{MARKER} ...' comments.")
+        if not allow_unnarrated:
+            sys.exit(f"No narration found. Add trailing '{MARKER} ...' "
+                     f"comments, or pass --pause SECONDS (greater than 0) to "
+                     f"render a silent video holding each line for that long.")
+        markers = _auto_markers(code_lines)
+        if not markers:
+            sys.exit("Nothing to render: the snippet has no code lines.")
+        unnarrated = True
 
     two_pass = any(TWO_PASS_SEP in m.text for m in markers)
     if two_pass and every:
@@ -1929,14 +2238,15 @@ def _build_all_beats(source_path, trace, every):
         loop_ranges = loop_body_ranges(source) if every else {}
         beats1 = []
         beats2 = build_beats(code_lines, markers, steps, every=every, loop_ranges=loop_ranges)
-    return code_lines, beats1, beats2
+    return code_lines, beats1, beats2, unnarrated
 
 
 def build(source_path, out_path, tts, trace=True, every=False,
           subtitles=False, typing=False, typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT,
           manual_audio_dir=None, style=None, bg_color=_USE_DEFAULT,
           state_bg_color=None, state_fg_color=None,
-          highlight_color=_USE_DEFAULT):
+          highlight_color=_USE_DEFAULT, allow_unnarrated=False,
+          font_size=None, screenflow=None):
     """
     Render an annotated Python snippet into a narrated screencast video.
 
@@ -1977,6 +2287,37 @@ def build(source_path, out_path, tts, trace=True, every=False,
         it applies within both passes and at the seam between them (the
         writing pass holds its finished code for `pause` seconds before the
         walkthrough starts). Never appended after the video's final beat.
+        With `allow_unnarrated=True` on a snippet that has no narration at
+        all, it is instead the full length of every beat.
+    allow_unnarrated :
+        Render a snippet with no ``#:`` comments at all instead of exiting
+        with "No narration found": one beat per code line, progressively
+        revealed, each held for `pause` seconds with no audio synthesized
+        (no TTS backend is used, whatever `tts` says). Intended for producing
+        a silent, evenly paced screencast to narrate afterwards in a video
+        editor. Requires `pause` > 0, since it is the whole length of each
+        beat. The CLI turns this on exactly when ``--pause`` is given
+        explicitly (or via `SNIPPET_CAST_PAUSE`), so a forgotten ``#:``
+        still reports the error rather than silently rendering.
+    font_size :
+        Code font size in pixels for this render [default: `FONT_SIZE`].
+        The state panel and the captions scale with it, each keeping the
+        offset it has from `FONT_SIZE` in the module constants — so a
+        `PANEL_FONT_SIZE` edited to differ stays that much apart. `None`
+        means "use `FONT_SIZE`", which renders exactly as it did before this
+        option existed. Values below `FONT_SIZE_MIN` are clamped (the CLI
+        rejects them outright). Changing it resizes the whole canvas, which
+        is fine — `plan_canvas()` measures the frame at this size — but it
+        must be decided once per video, never per frame (invariant 1).
+    screenflow :
+        Target frame as a `(width, height)` pair (see
+        `resolve_screenflow_arg()`), or None for a canvas sized to the
+        snippet. The content block keeps its natural size and is CENTRED in
+        that frame — nothing is scaled, so text stays crisp and the caption
+        band stays under the code rather than pinned to the frame's bottom
+        edge. A snippet whose natural canvas is larger than the frame raises
+        `ValueError` (the CLI turns that into an exit naming a `font_size`
+        that would fit) rather than being silently shrunk.
     manual_audio_dir :
         Directory of pre-recorded audio files for `tts="manual"`, named
         001.wav, 002.wav, ... (or .mp3/.m4a/.aiff/.flac/.ogg) matching
@@ -1989,8 +2330,11 @@ def build(source_path, out_path, tts, trace=True, every=False,
         the `STYLE` global.
     highlight_color :
         `"#rrggbb"` band behind the highlighted code line, overriding the
-        style's own `highlight_color`. `None` uses the style's; omit the
-        argument to use the `HIGHLIGHT_COLOR` global. Worth setting for a
+        style's own `highlight_color`. `HIGHLIGHT_PANEL` (`"panel"`, the
+        shipped `HIGHLIGHT_COLOR` default) tracks the STATE panel background,
+        including a per-run `state_bg_color`, so the band and the box read as
+        one surface. `None` uses the style's; omit the argument to use the
+        `HIGHLIGHT_COLOR` global. Worth setting for a
         style that declares none — pygments' unset default is a pale
         `#ffffcc` (`DarkModernStyle`/`LightModernStyle` are both in that
         boat); a style loaded from a `.theme` file gets one derived instead.
@@ -2059,23 +2403,37 @@ def build(source_path, out_path, tts, trace=True, every=False,
     else:
         synth = BACKENDS[tts]
 
-    code_lines, beats1, beats2 = _build_all_beats(source_path, trace, every)
+    # `pause` is the whole length of an unnarrated beat, so 0 would mean
+    # zero-length clips (ffmpeg's concat rejects them). Fold that into the
+    # opt-in, so it is refused by _build_all_beats()'s message BEFORE
+    # trace_run() executes the snippet, not after.
+    code_lines, beats1, beats2, unnarrated = _build_all_beats(
+        source_path, trace, every,
+        allow_unnarrated=allow_unnarrated and pause > 0)
     _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
                        every, subtitles, typing, typing_speed, pause,
                        style, bg_color, state_bg_color, state_fg_color,
-                       highlight_color)
+                       highlight_color, unnarrated=unnarrated,
+                       font_size=font_size, screenflow=screenflow)
 
 
 def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
                        every, subtitles, typing, typing_speed, pause,
                        style=None, bg_color=_USE_DEFAULT,
                        state_bg_color=None, state_fg_color=None,
-                       highlight_color=_USE_DEFAULT):
+                       highlight_color=_USE_DEFAULT, unnarrated=False,
+                       font_size=None, screenflow=None):
     """Render already-computed beats (from _build_all_beats()) to `out_path`.
     Factored out of build() so record_narration() can render straight from
     the beats its interactive session already built — reusing the SAME
     interpolated narration/state the user recorded against, and skipping a
-    second trace_run() (a second full execution of the user's snippet)."""
+    second trace_run() (a second full execution of the user's snippet).
+
+    `unnarrated` renders the auto-generated, marker-less beat sequence: every
+    beat is its frame held for `pause` seconds and `synth` is never called at
+    all, so no TTS backend is needed and each frame lasts exactly as long as
+    asked. (Two-pass mode needs a '/' in a marker, so beats1 is always empty
+    here — only the single-pass path below has to handle it.)"""
     two_pass = bool(beats1)
     if two_pass and typing:
         print("note: --typing has no effect in two-pass mode ('/' in a "
@@ -2093,11 +2451,12 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
         print(f"{len(beats1)+len(beats2)} beats ({len(beats1)} pass-1 + "
               f"{len(beats2)} pass-2) -> {out_path}  (backend: {tts}, "
               f"trace: {'on' if trace else 'off'}, two-pass)")
-        cv = plan_canvas(code_lines, beats1 + beats2, show_panel=trace,
+        cv = _plan_canvas_or_exit(code_lines, beats1 + beats2, show_panel=trace,
                          subtitles=subtitles, style=style, bg_color=bg_color,
                          state_bg_color=state_bg_color,
                          state_fg_color=state_fg_color,
-                         highlight_color=highlight_color)
+                         highlight_color=highlight_color, font_size=font_size,
+                         screenflow=screenflow)
         audio_cache = {}
         clips = _render_two_pass(code_lines, beats1, beats2, cv, work, synth,
                                  audio_cache, typing_speed, pause, pause_mode)
@@ -2110,12 +2469,20 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
     mode = "every-exec" if every else "first-exec"
     extras = "".join(x for x in [" +subs" if subtitles else "",
                                  " +typing" if typing else ""])
-    print(f"{len(beats)} beats -> {out_path}  "
-          f"(backend: {tts}, trace: {'on' if trace else 'off'}, {mode}{extras})")
-    cv = plan_canvas(code_lines, beats, show_panel=trace, subtitles=subtitles,
+    if unnarrated:
+        if subtitles:
+            print("note: --subtitles has no effect without narration.")
+        print(f"{len(beats)} beats -> {out_path}  "
+              f"(no narration: {pause:g}s per frame, "
+              f"trace: {'on' if trace else 'off'}, {mode}{extras})")
+    else:
+        print(f"{len(beats)} beats -> {out_path}  "
+              f"(backend: {tts}, trace: {'on' if trace else 'off'}, {mode}{extras})")
+    cv = _plan_canvas_or_exit(code_lines, beats, show_panel=trace, subtitles=subtitles,
                      style=style, bg_color=bg_color,
                      state_bg_color=state_bg_color, state_fg_color=state_fg_color,
-                     highlight_color=highlight_color)
+                     highlight_color=highlight_color, font_size=font_size,
+                     screenflow=screenflow)
 
     audio_cache = {}   # identical narration (e.g. an un-interpolated loop line) -> reuse
     clips = []
@@ -2139,20 +2506,31 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
         hold = compose(cv, _visible_code(code_lines, beat.revealed),
                        [beat.highlight] if beat.highlight else [],
                        beat.state, caption, os.path.join(work, f"hold_{k:03d}.png"))
-        audio = _cached_synth(synth, audio_cache, beat.narration, work,
-                              f"{k:03d}", pause_mode)
         nclip = os.path.join(work, f"clip_{k:03d}.mp4")
-        make_clip(hold, audio, nclip)
-        clips.append(nclip)
+        if unnarrated:
+            # No narration to time against, so `pause` IS the beat length —
+            # one hold clip, and no separate trailing gap clip (that would
+            # make every frame 2*pause).
+            make_pause_clip(hold, pause, nclip)
+            clips.append(nclip)
+        else:
+            audio = _cached_synth(synth, audio_cache, beat.narration, work,
+                                  f"{k:03d}", pause_mode)
+            make_clip(hold, audio, nclip)
+            clips.append(nclip)
 
-        if pause > 0 and k < len(beats) - 1:
-            pclip = os.path.join(work, f"pause_{k:03d}.mp4")
-            make_pause_clip(hold, pause, pclip)
-            clips.append(pclip)
+            if pause > 0 and k < len(beats) - 1:
+                pclip = os.path.join(work, f"pause_{k:03d}.mp4")
+                make_pause_clip(hold, pause, pclip)
+                clips.append(pclip)
 
         if beat.revealed is not None:
             prev_revealed = beat.revealed
-        print(f"  [{k+1}/{len(beats)}] {beat.narration[:60]}")
+        # Unnarrated beats have nothing to echo, so show the line instead.
+        label = beat.narration[:60]
+        if not label and beat.highlight:
+            label = code_lines[beat.highlight - 1].strip()[:60]
+        print(f"  [{k+1}/{len(beats)}] {label or '(silent)'}")
 
     concat(clips, out_path, work)
     shutil.rmtree(work, ignore_errors=True)
@@ -2218,7 +2596,7 @@ def export_script(source_path, trace=True, every=False):
     request audio — as a list of printable lines. Touches no ffmpeg/ffprobe,
     so it works even where those aren't installed. Use this to know exactly
     what to record for `tts="manual"`."""
-    _, beats1, beats2 = _build_all_beats(source_path, trace, every)
+    _, beats1, beats2, _ = _build_all_beats(source_path, trace, every)
     return _format_script(beats1, beats2)
 
 
@@ -2410,7 +2788,8 @@ def record_narration(source_path, manual_audio_dir, out_path, trace=True,
                      typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT, show_frame=True,
                      build_after=True, input_fn=input,
                      record_fn=_record_until_enter, play_fn=_play,
-                     frame_fn=None, style=None, bg_color=_USE_DEFAULT,
+                     frame_fn=None, font_size=None, screenflow=None,
+                     style=None, bg_color=_USE_DEFAULT,
                      state_bg_color=None, state_fg_color=None,
                      highlight_color=_USE_DEFAULT):
     """
@@ -2491,7 +2870,7 @@ def record_narration(source_path, manual_audio_dir, out_path, trace=True,
                  "(uses system_profiler/avfoundation/afplay).")
     os.makedirs(manual_audio_dir, exist_ok=True)
 
-    code_lines, beats1, beats2 = _build_all_beats(source_path, trace, every)
+    code_lines, beats1, beats2, _ = _build_all_beats(source_path, trace, every)
     two_pass = bool(beats1)
     final_pass1_revealed = beats1[-1].revealed if beats1 else None
 
@@ -2506,11 +2885,12 @@ def record_narration(source_path, manual_audio_dir, out_path, trace=True,
 
     cv = None
     if show_frame:
-        cv = plan_canvas(code_lines, beats1 + beats2, show_panel=trace, subtitles=False,
+        cv = _plan_canvas_or_exit(code_lines, beats1 + beats2, show_panel=trace, subtitles=False,
                          style=style, bg_color=bg_color,
                          state_bg_color=state_bg_color,
                          state_fg_color=state_fg_color,
-                         highlight_color=highlight_color)
+                         highlight_color=highlight_color, font_size=font_size,
+                         screenflow=screenflow)
 
     device_name = _default_input_device()
     session_dir = tempfile.mkdtemp(prefix="snippet_cast_record_")
@@ -2573,7 +2953,8 @@ def record_narration(source_path, manual_audio_dir, out_path, trace=True,
         _render_from_beats(code_lines, beats1, beats2, out_path, "manual", synth,
                            trace, every, subtitles, typing, typing_speed, pause,
                            style, bg_color, state_bg_color, state_fg_color,
-                           highlight_color)
+                           highlight_color, font_size=font_size,
+                           screenflow=screenflow)
     return True
 
 
@@ -2582,12 +2963,20 @@ ENV_PREFIX = "SNIPPET_CAST_"
 
 def _env_default(name, fallback):
     """A `SNIPPET_CAST_<NAME>` environment variable as a default value, typed
-    to match `fallback` (bool/float/str), or `fallback` itself if unset."""
+    to match `fallback` (bool/int/float/str), or `fallback` itself if unset.
+    The bool check must stay FIRST: `isinstance(True, int)` is True, so an
+    int branch ahead of it would turn every boolean flag's env var into
+    int('true') -> a spurious exit."""
     val = os.environ.get(ENV_PREFIX + name.upper())
     if val is None:
         return fallback
     if isinstance(fallback, bool):
         return val.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(fallback, int):
+        try:
+            return int(val)
+        except ValueError:
+            sys.exit(f"{ENV_PREFIX}{name.upper()}={val!r} is not a valid integer.")
     if isinstance(fallback, float):
         try:
             return float(val)
@@ -2610,6 +2999,47 @@ def resolve_env_defaults(args, **fallbacks):
         if getattr(args, name) is None:
             setattr(args, name, _env_default(name, fallback))
     return args
+
+
+SCREENFLOW_RE = re.compile(r"(\d{1,5})\s*[xX*]\s*(\d{1,5})\Z")
+SCREENFLOW_TRUTHY = ("1", "true", "yes", "on")
+
+
+def resolve_screenflow_arg(raw):
+    """Normalize a raw `--screenflow` value into `(width, height)`, or None
+    when the option wasn't used. Shared by `main()` and the cell magic, which
+    render the `ValueError` their own way — the same split as
+    resolve_style_args()/resolve_panel_args(), so a bad spelling is caught at
+    parse time rather than deep inside the first frame render (which is AFTER
+    trace_run() has already executed the user's snippet).
+
+    Accepts `WxH` and, so the environment variable can act as a plain
+    on-switch the way the bare flag does, any of SCREENFLOW_TRUTHY (meaning
+    SCREENFLOW_SIZE). Odd dimensions are rounded up: libx264 needs even ones.
+    """
+    if raw is None or raw is False:
+        return None
+    if raw is True:
+        raw = SCREENFLOW_SIZE
+    text = str(raw).strip()
+    if text.lower() in SCREENFLOW_TRUTHY:
+        text = SCREENFLOW_SIZE
+    m = SCREENFLOW_RE.match(text)
+    if not m:
+        # The likeliest way to land here is `--screenflow input.py`: the value
+        # is optional, so argparse hands the following positional to the flag
+        # instead of to `input`. Say so rather than only rejecting the value.
+        hint = ""
+        if text.endswith(".py") or os.path.exists(text):
+            hint = (f" — {text!r} looks like the input file; put it before the "
+                    f"flag (snippet-cast {text} --screenflow) or give the flag "
+                    f"its own size (--screenflow {SCREENFLOW_SIZE} {text}).")
+        raise ValueError(f"--screenflow: expected WxH, e.g. {SCREENFLOW_SIZE}, "
+                         f"got {text!r}{hint}")
+    w, h = (_even(int(g)) for g in m.groups())
+    if w < 2 or h < 2:
+        raise ValueError(f"--screenflow: {text!r} is too small to hold a frame.")
+    return w, h
 
 
 BG_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}\Z")
@@ -2650,24 +3080,29 @@ def resolve_style_args(style, bg_color, highlight_color=None):
             _hex_color_arg("--bg-color", bg_color,
                            "to use the style's own background"),
             _hex_color_arg("--highlight-color", highlight_color,
-                           "to use the style's own highlight color"))
+                           "to use the style's own highlight color",
+                           allow=(HIGHLIGHT_PANEL,)))
 
 
-def _hex_color_arg(flag, value, none_means):
+def _hex_color_arg(flag, value, none_means, allow=()):
     """One raw color string from `main()`/the cell magic -> '#rrggbb' or None.
 
     BG_COLOR_NONE ('none') maps to None, which each caller reads as its own
     "no override" default. Only '#rrggbb' is accepted, not the wider set PIL
     would take, because _is_light() and _mix() both parse a color by slicing
-    those exact six hex digits."""
+    those exact six hex digits. `allow` lists extra literal spellings that
+    pass through untouched (HIGHLIGHT_PANEL, for --highlight-color)."""
     if not isinstance(value, str):
         return value
     value = value.strip()
     if value.lower() == BG_COLOR_NONE:
         return None
+    if value.lower() in allow:
+        return value.lower()
     if not BG_COLOR_RE.match(value):
+        extra = "".join(f", {a!r}" for a in allow)
         raise ValueError(f"{flag}: {value!r} is not a '#rrggbb' hex color "
-                         f"(or {BG_COLOR_NONE!r} {none_means})")
+                         f"(or {BG_COLOR_NONE!r} {none_means}{extra})")
     return value
 
 
@@ -2736,8 +3171,25 @@ def main():
                          f"style's [default: {BG_COLOR}; env: SNIPPET_CAST_BG_COLOR]")
     ap.add_argument("--highlight-color", default=None, metavar="HEX",
                     help="band behind the highlighted code line as '#rrggbb', "
-                         f"overriding the style's own; {BG_COLOR_NONE!r} uses "
-                         "the style's [env: SNIPPET_CAST_HIGHLIGHT_COLOR]")
+                         f"overriding the style's own; {HIGHLIGHT_PANEL!r} "
+                         "matches the STATE panel background (so the two read "
+                         f"as one surface), {BG_COLOR_NONE!r} uses the style's "
+                         f"[default: {HIGHLIGHT_COLOR}; "
+                         "env: SNIPPET_CAST_HIGHLIGHT_COLOR]")
+    ap.add_argument("--screenflow", nargs="?", const=SCREENFLOW_SIZE,
+                    default=None, metavar="WxH",
+                    help="render onto a fixed frame of this size with the "
+                         "content centred, instead of a canvas sized to the "
+                         "snippet — for dropping straight onto a video-editor "
+                         "timeline. Nothing is scaled, so text stays crisp; "
+                         "a snippet too big for the frame is an error naming "
+                         "the --font-size that would fit "
+                         f"[bare flag: {SCREENFLOW_SIZE}; env: "
+                         "SNIPPET_CAST_SCREENFLOW]")
+    ap.add_argument("--font-size", type=int, default=None, metavar="PX",
+                    help="code font size in pixels; the state panel and captions "
+                         "scale with it, each keeping its own offset "
+                         f"[default: {FONT_SIZE}; env: SNIPPET_CAST_FONT_SIZE]")
     ap.add_argument("--state-bg-color", default=None, metavar="HEX",
                     help="background of the state panel as '#rrggbb'; "
                          f"{BG_COLOR_NONE!r} keeps the default "
@@ -2750,7 +3202,10 @@ def main():
     ap.add_argument("--pause", type=float, default=None, metavar="SECONDS",
                     help="seconds of silence to hold on each beat's frame after "
                          "its narration finishes, before the next beat begins "
-                         "(in two-pass mode, also between the two passes) "
+                         "(in two-pass mode, also between the two passes); "
+                         "giving this explicitly also allows a snippet with NO "
+                         f"{MARKER} narration at all, rendering one silent frame "
+                         "per code line held for this long, to narrate later "
                          f"[default: {PAUSE_DEFAULT}; env: SNIPPET_CAST_PAUSE]")
     ap.add_argument("--export-script", action=argparse.BooleanOptionalAction, default=None,
                     help="print the ordered, numbered narration script and exit "
@@ -2801,6 +3256,12 @@ def main():
     tts_explicit = args.tts is not None or os.environ.get("SNIPPET_CAST_TTS") is not None
     manual_dir_explicit = (args.manual_audio_dir is not None
                            or os.environ.get("SNIPPET_CAST_MANUAL_AUDIO_DIR") is not None)
+    # Same trick for --pause: asking for a specific frame length is what opts
+    # a narration-less snippet into a silent render (build(allow_unnarrated=)).
+    # PAUSE_DEFAULT is > 0, so testing the resolved value can't tell "I want
+    # silent frames this long" from "I never mentioned --pause" — and a
+    # forgotten '#:' must still report No narration found.
+    pause_explicit = args.pause is not None or os.environ.get("SNIPPET_CAST_PAUSE") is not None
     resolve_env_defaults(
         args, tts="say", no_trace=False, every=False, subtitles=False, typing=False,
         typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT, export_script=False,
@@ -2808,13 +3269,22 @@ def main():
         name="out", output_dir=".", style=STYLE,
         bg_color=BG_COLOR if BG_COLOR else BG_COLOR_NONE,
         state_bg_color=PANEL_BG, state_fg_color=None,
-        highlight_color=HIGHLIGHT_COLOR)
+        highlight_color=HIGHLIGHT_COLOR, font_size=FONT_SIZE, screenflow=None)
     if args.style == STYLE_LIST_ARG:
         # A listing query, not a render — the one invocation with no input
         # file, which is why `input` is nargs="?" above. Every other path
         # still requires it, with argparse's own wording.
         print("\n".join(style_names()))
         return
+    # Resolved BEFORE the missing-input check on purpose: --screenflow takes an
+    # optional value, so `snippet-cast --screenflow in.py` hands the file to the
+    # flag and leaves `input` empty. Checking input first would answer that with
+    # argparse's generic "required: input" instead of the hint that says where
+    # the file actually went.
+    try:
+        args.screenflow = resolve_screenflow_arg(args.screenflow)
+    except ValueError as e:
+        sys.exit(str(e))
     if args.input is None:
         ap.error("the following arguments are required: input")
     try:
@@ -2835,6 +3305,8 @@ def main():
         sys.exit("--pause must be >= 0.")
     if args.typing_speed <= 0:
         sys.exit("--typing-speed must be > 0.")
+    if args.font_size < FONT_SIZE_MIN:
+        sys.exit(f"--font-size must be >= {FONT_SIZE_MIN}.")
 
     if args.record:
         if tts_explicit and args.tts != "manual":
@@ -2875,7 +3347,8 @@ def main():
                          trace=not args.no_trace, every=args.every,
                          subtitles=args.subtitles, typing=args.typing,
                          typing_speed=args.typing_speed, pause=args.pause,
-                         show_frame=not args.no_frame,
+                         show_frame=not args.no_frame, font_size=args.font_size,
+                         screenflow=args.screenflow,
                          style=args.style, bg_color=args.bg_color,
                          state_bg_color=args.state_bg_color,
                          state_fg_color=args.state_fg_color,
@@ -2889,7 +3362,8 @@ def main():
           manual_audio_dir=args.manual_audio_dir,
           style=args.style, bg_color=args.bg_color,
           state_bg_color=args.state_bg_color, state_fg_color=args.state_fg_color,
-          highlight_color=args.highlight_color)
+          highlight_color=args.highlight_color, allow_unnarrated=pause_explicit,
+          font_size=args.font_size, screenflow=args.screenflow)
 
 
 if __name__ == "__main__":

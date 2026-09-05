@@ -1,9 +1,12 @@
+import json
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 import snippet_cast.screencast as sc
 from snippet_cast import build, export_script
@@ -18,13 +21,19 @@ from snippet_cast.screencast import (
     BUILTIN_STYLES,
     DarkModernStyle,
     LightModernStyle,
+    FONT_SIZE_MIN,
+    SCREENFLOW_SIZE,
+    TYPE_MAXFRAMES,
+    _auto_markers,
     _env_default,
+    _font_sizes,
     _format_script,
     _mono_font_path,
     _narration_sequence,
     _parse_order,
     _two_pass_beats,
     build_beats,
+    compose,
     loop_body_ranges,
     make_pass1_code_clip,
     order_markers,
@@ -34,6 +43,7 @@ from snippet_cast.screencast import (
     resolve_footnotes,
     resolve_panel_args,
     resolve_output_path,
+    resolve_screenflow_arg,
     resolve_style_args,
     split_narration,
     trace_run,
@@ -105,6 +115,309 @@ def test_build_renders_silent_mp4(tmp_path):
 
     assert out.exists()
     assert out.stat().st_size > 0
+
+
+UNNARRATED = """\
+# a demo with no narration at all
+def double(x):
+    return x * 2
+
+value = double(3)
+# the end
+"""
+
+
+def test_auto_markers_skip_comment_lines_but_always_cover_the_last_one():
+    code_lines, markers = parse(UNNARRATED)
+    assert markers == []          # nothing for parse() to find
+
+    auto = _auto_markers(code_lines)
+    # Comment-only lines 1 and 6 get no beat of their own, EXCEPT line 6 —
+    # the last non-blank line, which must be marked or _reveal_groups() never
+    # reveals it. Line 4 is blank and never marked.
+    assert [(m.line_no, m.has_code) for m in auto] == [
+        (2, True), (3, True), (5, True), (6, False)]
+    assert all(m.text == "" for m in auto)
+
+
+def test_auto_markers_reveal_every_line_progressively():
+    code_lines, _ = parse(UNNARRATED)
+    beats = build_beats(code_lines, _auto_markers(code_lines),
+                        trace_run(UNNARRATED, "<unnarrated>"), every=False)
+
+    assert [b.highlight for b in beats] == [2, 3, 5, None]
+    assert all(b.narration == "" for b in beats)
+    # The leading comment rides along with the first beat; the trailing one
+    # with the last, so the whole snippet ends up visible.
+    assert sorted(beats[0].revealed) == [1, 2]
+    assert sorted(beats[-1].revealed) == [1, 2, 3, 4, 5, 6]
+
+
+def test_auto_markers_ignore_a_file_with_no_code_lines():
+    assert _auto_markers(["", "   ", ""]) == []
+
+
+def test_build_without_narration_errors_unless_opted_in(tmp_path, capsys):
+    src = tmp_path / "plain.py"
+    src.write_text(UNNARRATED)
+
+    with pytest.raises(SystemExit) as excinfo:
+        build(str(src), str(tmp_path / "out.mp4"), tts="silent")
+    assert "No narration found" in str(excinfo.value)
+
+    # pause=0 would mean zero-length clips, so it is refused the same way.
+    with pytest.raises(SystemExit) as excinfo:
+        build(str(src), str(tmp_path / "out.mp4"), tts="silent",
+              allow_unnarrated=True, pause=0)
+    assert "No narration found" in str(excinfo.value)
+
+
+def test_export_script_without_narration_still_errors(tmp_path):
+    src = tmp_path / "plain.py"
+    src.write_text(UNNARRATED)
+
+    with pytest.raises(SystemExit) as excinfo:
+        export_script(str(src))
+    assert "No narration found" in str(excinfo.value)
+
+
+@pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
+def test_build_unnarrated_holds_each_frame_and_never_synthesizes(tmp_path, monkeypatch):
+    src = tmp_path / "plain.py"
+    src.write_text(UNNARRATED)
+    out = tmp_path / "out.mp4"
+
+    def boom(text, out_stem):   # no TTS backend is needed in this mode at all
+        raise AssertionError("synth() called for an unnarrated snippet")
+    monkeypatch.setitem(sc.BACKENDS, "silent", boom)
+
+    build(str(src), str(out), tts="silent", allow_unnarrated=True, pause=1.5)
+
+    assert out.exists()
+    # 4 beats x 1.5s, and no trailing gap clip on top of them.
+    assert sc.probe_duration(str(out)) == pytest.approx(4 * 1.5, abs=0.15)
+
+
+UNNARRATED_LOOP = """\
+x = 0
+for i in range(3):
+    x += i
+"""
+
+
+def test_auto_markers_drive_every_exec_mode_too():
+    code_lines, _ = parse(UNNARRATED_LOOP)
+    beats = build_beats(code_lines, _auto_markers(code_lines),
+                        trace_run(UNNARRATED_LOOP, "<loop>"), every=True,
+                        loop_ranges=loop_body_ranges(UNNARRATED_LOOP))
+
+    # One beat per execution, with the loop header's exhausting evaluation
+    # still suppressed (invariant 4) — no phantom 8th beat.
+    assert [b.highlight for b in beats] == [1, 2, 3, 2, 3, 2, 3]
+    assert all(b.revealed is None for b in beats)   # every-exec shows all code
+    assert [b.state["x"] for b in beats] == ["0", "0", "0", "0", "1", "1", "3"]
+
+
+@pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
+def test_build_unnarrated_with_every_holds_each_execution(tmp_path):
+    src = tmp_path / "loop.py"
+    src.write_text(UNNARRATED_LOOP)
+    out = tmp_path / "out.mp4"
+
+    # --typing-speed is inert here (--every never types), and must not change
+    # the pacing: 7 executions x 2s and nothing else.
+    build(str(src), str(out), tts="silent", every=True, typing_speed=2,
+          allow_unnarrated=True, pause=2)
+
+    assert sc.probe_duration(str(out)) == pytest.approx(7 * 2, abs=0.15)
+
+
+def test_font_sizes_default_matches_the_module_constants():
+    # None and an explicit FONT_SIZE must both reproduce the pre---font-size
+    # look exactly, or every existing render shifts.
+    assert _font_sizes() == _font_sizes(FONT_SIZE)
+    assert _font_sizes().code == FONT_SIZE
+    assert _font_sizes().panel == sc.PANEL_FONT_SIZE
+    assert _font_sizes().caption == max(14, FONT_SIZE - 4)
+    assert _font_sizes().panel_header == max(12, sc.PANEL_FONT_SIZE - 8)
+
+
+def test_font_sizes_scale_every_size_together():
+    big = _font_sizes(FONT_SIZE + 14)
+    assert big.code == FONT_SIZE + 14
+    assert big.panel == sc.PANEL_FONT_SIZE + 14          # shipped offset is 0
+    assert big.caption == _font_sizes().caption + 14
+    assert big.panel_header == _font_sizes().panel_header + 14
+
+
+def test_font_sizes_preserve_a_deliberate_panel_offset(monkeypatch):
+    # PANEL_FONT_SIZE edited to sit 6px below the code must STAY 6px below
+    # when --font-size scales the frame, not get flattened into a mirror.
+    monkeypatch.setattr(sc, "PANEL_FONT_SIZE", FONT_SIZE - 6)
+    assert _font_sizes(FONT_SIZE).panel == FONT_SIZE - 6
+    assert _font_sizes(FONT_SIZE + 10).panel == FONT_SIZE + 4
+
+
+def test_font_sizes_floor_and_clamp_small_sizes():
+    assert _font_sizes(1).code == FONT_SIZE_MIN          # clamped, never 0/negative
+    # Subordinate text never ends up LARGER than what it is subordinate to.
+    for size in range(FONT_SIZE_MIN, FONT_SIZE + 1):
+        f = _font_sizes(size)
+        assert f.caption <= f.code
+        assert f.panel_header <= f.panel
+
+
+def test_plan_canvas_carries_and_grows_with_the_font_size():
+    beat = Beat(revealed=None, highlight=1, narration="hi", state={"x": "1"})
+    small = plan_canvas(["x = 1"], [beat], show_panel=True, subtitles=True)
+    big = plan_canvas(["x = 1"], [beat], show_panel=True, subtitles=True,
+                      font_size=FONT_SIZE + 14)
+
+    assert small.fonts == _font_sizes()
+    assert big.fonts.code == FONT_SIZE + 14
+    assert big.W > small.W and big.H > small.H
+    # Sizing it explicitly at the default must not move a single pixel.
+    same = plan_canvas(["x = 1"], [beat], show_panel=True, subtitles=True,
+                       font_size=FONT_SIZE)
+    assert (same.W, same.H, same.code_w, same.panel_w) == (
+        small.W, small.H, small.code_w, small.panel_w)
+
+
+def test_env_default_reads_ints_without_breaking_bools(monkeypatch):
+    monkeypatch.setenv("SNIPPET_CAST_FONT_SIZE", "34")
+    assert _env_default("font_size", FONT_SIZE) == 34
+    # isinstance(True, int) is True, so the bool branch must stay ahead of the
+    # int one or every boolean flag's env var would try int("true").
+    monkeypatch.setenv("SNIPPET_CAST_SUBTITLES", "true")
+    assert _env_default("subtitles", False) is True
+
+
+@pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
+def test_render_at_default_font_size_is_byte_identical(tmp_path):
+    """font_size=None and font_size=FONT_SIZE must produce the same frame."""
+    code_lines, markers = parse(FIB.read_text())
+    beats = build_beats(code_lines, markers, trace_run(FIB.read_text(), str(FIB)),
+                        every=False)
+    rendered = []
+    for tag, size in (("none", None), ("explicit", FONT_SIZE)):
+        cv = plan_canvas(code_lines, beats, show_panel=True, subtitles=True,
+                         font_size=size)
+        path = compose(cv, "\n".join(code_lines), [beats[1].highlight],
+                       beats[1].state, cv.captions[1], str(tmp_path / f"{tag}.png"))
+        rendered.append(Path(path).read_bytes())
+
+    assert rendered[0] == rendered[1]
+
+
+@pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
+def test_build_accepts_font_size(tmp_path):
+    out = tmp_path / "big.mp4"
+    build(str(FIB), str(out), tts="silent", font_size=FONT_SIZE + 14)
+
+    assert out.exists()
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=width,height",
+         "-of", "csv=p=0", str(out)], capture_output=True, text=True, check=True)
+    w, h = (int(v) for v in probe.stdout.strip().splitlines()[0].split(","))
+
+    src = FIB.read_text()
+    code_lines, markers = parse(src)
+    beats = build_beats(code_lines, markers, trace_run(src, str(FIB)), every=False)
+    base = plan_canvas(code_lines, beats, show_panel=True, subtitles=False)
+    assert w > base.W and h > base.H
+
+
+def test_resolve_screenflow_arg_accepts_its_spellings():
+    assert resolve_screenflow_arg(None) is None
+    assert resolve_screenflow_arg(False) is None
+    assert resolve_screenflow_arg("1280x720") == (1280, 720)
+    assert resolve_screenflow_arg("1280X720") == (1280, 720)
+    assert resolve_screenflow_arg(" 1280 x 720 ") == (1280, 720)
+    # The bare flag and a truthy env var both mean the default frame.
+    assert resolve_screenflow_arg(True) == resolve_screenflow_arg(SCREENFLOW_SIZE)
+    assert resolve_screenflow_arg("on") == resolve_screenflow_arg(SCREENFLOW_SIZE)
+    # libx264 needs even dimensions.
+    assert resolve_screenflow_arg("1921x1081") == (1922, 1082)
+
+
+def test_resolve_screenflow_arg_rejects_bad_values():
+    for bad in ("huge", "1920", "x", "1920x"):
+        with pytest.raises(ValueError, match="expected WxH"):
+            resolve_screenflow_arg(bad)
+
+
+def test_resolve_screenflow_arg_explains_the_swallowed_input_file():
+    # --screenflow's value is optional, so `--screenflow in.py` hands the file
+    # to the flag. The error has to say where the file went, not just that the
+    # value is malformed.
+    with pytest.raises(ValueError) as excinfo:
+        resolve_screenflow_arg("snippet.py")
+    assert "looks like the input file" in str(excinfo.value)
+
+
+def _fib_beats():
+    src = FIB.read_text()
+    code_lines, markers = parse(src)
+    return code_lines, build_beats(code_lines, markers, trace_run(src, str(FIB)),
+                                   every=False)
+
+
+def test_screenflow_centres_the_content_in_an_exact_frame():
+    code_lines, beats = _fib_beats()
+    base = plan_canvas(code_lines, beats, show_panel=True, subtitles=True)
+    sf = plan_canvas(code_lines, beats, show_panel=True, subtitles=True,
+                     screenflow=(1920, 1080))
+
+    assert (sf.W, sf.H) == (1920, 1080)          # exactly what was asked for
+    assert (sf.cw, sf.ch) == (base.W, base.H)    # content keeps its natural size
+    assert (sf.off_x, sf.off_y) == ((1920 - base.W) // 2, (1080 - base.H) // 2)
+    # Measured BEFORE padding, so captions must not re-flow to the wider frame.
+    assert sf.captions == base.captions
+    assert sf.cap_h == base.cap_h
+
+
+def test_plan_canvas_without_screenflow_has_a_no_op_content_block():
+    code_lines, beats = _fib_beats()
+    cv = plan_canvas(code_lines, beats, show_panel=True, subtitles=True)
+
+    assert (cv.cw, cv.ch) == (cv.W, cv.H)
+    assert (cv.off_x, cv.off_y) == (0, 0)
+
+
+def test_screenflow_too_small_names_a_font_size_that_fits():
+    code_lines, beats = _fib_beats()
+    with pytest.raises(ValueError) as excinfo:
+        plan_canvas(code_lines, beats, show_panel=True, subtitles=True,
+                    screenflow=(400, 300))
+    message = str(excinfo.value)
+    assert "too small" in message and "--font-size" in message
+
+
+@pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
+def test_screenflow_render_is_exactly_the_requested_frame(tmp_path):
+    out = tmp_path / "sf.mp4"
+    build(str(FIB), str(out), tts="silent", screenflow=(1280, 720))
+
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=width,height",
+         "-of", "csv=p=0", str(out)], capture_output=True, text=True, check=True)
+    assert probe.stdout.strip().splitlines()[0] == "1280,720"
+
+
+@pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
+def test_screenflow_frame_keeps_the_content_pixel_identical(tmp_path):
+    """Padding must MOVE the content block, never redraw or rescale it."""
+    code_lines, beats = _fib_beats()
+    base = plan_canvas(code_lines, beats, show_panel=True, subtitles=True)
+    sf = plan_canvas(code_lines, beats, show_panel=True, subtitles=True,
+                     screenflow=(1920, 1080))
+
+    args = ("\n".join(code_lines), [beats[2].highlight], beats[2].state)
+    plain = Image.open(compose(base, *args, base.captions[2], str(tmp_path / "a.png")))
+    padded = Image.open(compose(sf, *args, sf.captions[2], str(tmp_path / "b.png")))
+
+    crop = padded.crop((sf.off_x, sf.off_y, sf.off_x + sf.cw, sf.off_y + sf.ch))
+    assert list(crop.getdata()) == list(plain.getdata())
 
 
 def test_split_narration_no_slash_is_backward_compatible():
@@ -219,7 +532,10 @@ def test_build_beats_reveals_only_visited_lines_in_custom_order():
     assert revealed[-1] == {1, 2, 3}               # final beat has revealed everything
 
 
-def test_two_pass_beats_supports_independent_per_pass_order():
+def test_unnumbered_walkthrough_inherits_the_writing_passs_order():
+    """Numbering only the writing side (the natural way to write it) must
+    order BOTH passes. It used to order only pass 1, so the video jumped
+    around while writing and then marched top-to-bottom while explaining."""
     source = (
         "def counter(n):       #: 2) sig / whole thing\n"
         "    total = 0         #: 1) start / total is {total}\n"
@@ -231,8 +547,117 @@ def test_two_pass_beats_supports_independent_per_pass_order():
 
     # pass 1 is explicitly reordered: line 2, then line 1, then line 3
     assert [b.highlight for b in beats1] == [2, 1, 3]
-    # pass 2 has no numbers anywhere -> default top-to-bottom order
-    assert [b.highlight for b in beats2] == [1, 2, 3]
+    # pass 2 carries no numbers of its own, so it follows pass 1
+    assert [b.highlight for b in beats2] == [2, 1, 3]
+    # ...each beat carrying its OWN line's walkthrough text with it. ({total}
+    # stays literal because this snippet never calls counter(), so nothing
+    # traces — invariant 8.)
+    assert [b.narration for b in beats2] == ["total is {total}", "whole thing",
+                                             "return it"]
+
+
+def test_two_pass_beats_supports_independent_per_pass_order():
+    """Numbering pass 2 explicitly still overrides the inheritance above —
+    the two passes can genuinely run in different orders."""
+    source = (
+        "def counter(n):       #: 2) sig / 3) whole thing\n"
+        "    total = 0         #: 1) start / 1) total is {total}\n"
+        "    return total      #: 3) ret / 2) return it\n"
+    )
+    code_lines, markers = parse(source)
+    steps = trace_run(source, "<reorder-twopass-test>")
+    beats1, beats2 = _two_pass_beats(code_lines, markers, steps)
+
+    assert [b.highlight for b in beats1] == [2, 1, 3]
+    assert [b.highlight for b in beats2] == [2, 3, 1]
+
+
+def test_two_pass_order_untouched_when_neither_pass_is_numbered():
+    source = ("x = 1   #: write x / explain x\n"
+              "y = 2   #: write y / explain y\n")
+    code_lines, markers = parse(source)
+    beats1, beats2 = _two_pass_beats(code_lines, markers, [])
+    assert [b.highlight for b in beats1] == [1, 2]
+    assert [b.highlight for b in beats2] == [1, 2]
+
+
+def test_two_pass_order_numbered_only_on_the_walkthrough_side():
+    """The mirror case: pass 1 unnumbered stays in source order, and the
+    inheritance must not fire backwards."""
+    source = ("x = 1   #: write x / 2) explain x\n"
+              "y = 2   #: write y / 1) explain y\n")
+    code_lines, markers = parse(source)
+    beats1, beats2 = _two_pass_beats(code_lines, markers, [])
+    assert [b.highlight for b in beats1] == [1, 2]
+    assert [b.highlight for b in beats2] == [2, 1]
+
+
+DEF_SNIPPET = """\
+def add_one(n, step=5):   #: define
+    x = n + step          #: body
+    return x              #: give it back
+
+result = add_one(7)       #: call it
+"""
+
+
+def test_trace_records_the_parameters_against_the_def_line():
+    """A `def` line's only step used to be the module-level one for executing
+    the def STATEMENT, whose post-state has no parameters in it — so
+    highlighting `def add_one(n):` showed an empty panel and the arguments
+    only appeared once the first body line was highlighted."""
+    steps = trace_run(DEF_SNIPPET, "<def>")
+    entries = [st for st in steps if st.call_entry]
+    assert [st.line_no for st in entries] == [1]
+    assert entries[0].disp == {"n": "7", "step": "5"}   # defaults included
+
+
+def test_def_line_beat_shows_the_parameters_in_first_exec_mode():
+    code_lines, markers = parse(DEF_SNIPPET)
+    beats = build_beats(code_lines, markers,
+                        trace_run(DEF_SNIPPET, "<def>"), every=False)
+    by_line = {b.highlight: b.state for b in beats}
+    assert by_line[1] == {"n": "7", "step": "5"}          # the def line
+    assert by_line[2] == {"n": "7", "step": "5", "x": "12"}
+
+
+def test_call_entry_steps_do_not_reach_every_mode_or_env_before():
+    """They describe the CALLEE's frame, so they must not add a beat per call
+    in --every, nor stand in as a comment marker's surrounding scope."""
+    steps = trace_run(DEF_SNIPPET, "<def>")
+    code_lines, markers = parse(DEF_SNIPPET)
+
+    every = build_beats(code_lines, markers, steps, every=True,
+                        loop_ranges=loop_body_ranges(DEF_SNIPPET))
+    assert [b.state for b in every if b.highlight == 1] == [{}]  # def stays bare
+    assert len(every) == len([st for st in steps if not st.call_entry
+                              and st.line_no in {1, 2, 3, 5}])
+
+
+def test_call_entry_steps_skip_frames_with_no_def_line():
+    """Comprehensions, generators and lambdas have no `def` header to attach
+    parameters to — their co_name is '<listcomp>' and friends."""
+    src = ("squares = [i * i for i in range(3)]\n"
+           "twice = lambda v: v * 2\n"
+           "r = twice(4)\n")
+    assert [st for st in trace_run(src, "<comp>") if st.call_entry] == []
+
+
+def test_call_entry_prefers_the_first_call_for_a_recursive_def():
+    src = ("def down(k):\n"
+           "    return 1 if k <= 0 else down(k - 1)\n"
+           "r = down(3)\n")
+    steps = trace_run(src, "<rec>")
+    assert [st.disp["k"] for st in steps if st.call_entry] == ["3", "2", "1", "0"]
+
+    code_lines, markers = parse("def down(k):   #: define\n"
+                                "    return 1 if k <= 0 else down(k - 1)\n"
+                                "r = down(3)    #: call\n")
+    beats = build_beats(code_lines, markers,
+                        trace_run("def down(k):\n"
+                                  "    return 1 if k <= 0 else down(k - 1)\n"
+                                  "r = down(3)\n", "<rec>"), every=False)
+    assert beats[0].state == {"k": "3"}   # the outermost call, not the deepest
 
 
 def test_build_rejects_order_prefixes_with_every(tmp_path):
@@ -652,7 +1077,7 @@ def test_make_pass1_code_clip_paces_by_typing_speed_not_narration_length(tmp_pat
 
     frames_dir = Path(outdir) / "type_t1"
     total_chars = len("\n".join(code_lines))
-    typing_n_frames = min(150, max(1, round(total_chars * 0.035 * FPS)))
+    typing_n_frames = min(TYPE_MAXFRAMES, max(1, round(total_chars * 0.035 * FPS)))
     floor_frames = round(10.0 * FPS)
     assert len(list(frames_dir.glob("*.png"))) == floor_frames  # padded to the narration floor
 
@@ -663,6 +1088,56 @@ def test_make_pass1_code_clip_paces_by_typing_speed_not_narration_length(tmp_pat
 
     first_frame = (frames_dir / "000.png").read_bytes()
     assert first_frame != last_typed  # typing actually progressed, not stretched thin
+
+
+@pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
+def test_typing_runs_to_completion_when_narration_ends_first(tmp_path):
+    """Regression: a line whose typing needs longer than its narration used
+    to stop mid-word. make_typing_clip's `-shortest` ended the clip the
+    instant the audio did and simply dropped the remaining frames, so the
+    next clip's fully-typed frame made the rest look typed in one jump. The
+    clip must now last the WHOLE frame sequence, with the narration followed
+    by silence."""
+    code_lines = ["def fibonacci_sequence(count_of_numbers):"]
+    beat = Beat(frozenset({1}), 1, "brief", {})
+    cv = plan_canvas(code_lines, [beat], show_panel=False, subtitles=False)
+
+    audio = str(tmp_path / "short.wav")
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+         "-t", "1.0", audio], check=True, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL)
+
+    clip = make_pass1_code_clip(cv, code_lines, frozenset(), [1], None,
+                                duration=1.0, outdir=str(tmp_path), tag="t",
+                                audio=audio, typing_speed=0.12)
+
+    frames = len(list((Path(str(tmp_path)) / "type_t").glob("*.png")))
+    assert frames > 1.0 * FPS          # typing genuinely outruns the narration
+    # Every generated frame is played, not cut off at the 1.0s audio.
+    assert sc.probe_duration(clip) == pytest.approx(frames / FPS, abs=0.15)
+
+
+@pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
+def test_typing_clip_still_never_truncates_a_longer_narration(tmp_path):
+    """The other direction — CLAUDE.md invariant 10. Padding the audio must
+    not let the video become the shorter stream when narration outlasts the
+    typed reveal."""
+    code_lines = ["x = 1"]
+    beat = Beat(frozenset({1}), 1, "long", {})
+    cv = plan_canvas(code_lines, [beat], show_panel=False, subtitles=False)
+
+    audio = str(tmp_path / "long.wav")
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+         "-t", "6", audio], check=True, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL)
+
+    clip = make_pass1_code_clip(cv, code_lines, frozenset(), [1], None,
+                                duration=6.0, outdir=str(tmp_path), tag="t",
+                                audio=audio, typing_speed=0.02)
+
+    assert sc.probe_duration(clip) >= 6.0 - 0.05
 
 
 @pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
@@ -1055,11 +1530,61 @@ def test_resolve_footnotes_single_pass_body_gains_no_separator():
     assert sc.TWO_PASS_SEP not in resolve_footnotes(src)
 
 
+def test_footnote_keeps_the_separator_when_pass_one_ends_up_empty():
+    """Regression: a footnote whose writing side has no text of its own.
+
+    Both spellings below say the same thing — pass 1 is just the numbered
+    label, the body is walkthrough text — and both must survive the merge as
+    a TWO-PASS line. Dropping the separator (the old `if part1:` test)
+    rewrote them to `1) Body.`, which re-parses as an UNnumbered pass 1 and a
+    pass 2 numbered 1: the label jumps passes, and in a file whose
+    walkthrough pass is otherwise unnumbered that trips order_markers()'
+    all-or-none check."""
+    # The separator on the body block...
+    assert resolve_footnotes("x = 2  #: 1)\n\n#: 1) / Body.\n") == \
+        "x = 2  #: 1) / Body.\n"
+    # ...or on the reference itself.
+    assert resolve_footnotes("x = 2  #: 1) /\n\n#: 1) Body.\n") == \
+        "x = 2  #: 1) / Body.\n"
+
+
+def test_footnote_with_empty_pass_one_builds_alongside_unnumbered_walkthroughs(tmp_path):
+    """The reported failure, end to end: every pass-1 text numbered, every
+    pass-2 text unnumbered, and one of the lines getting its walkthrough text
+    from a footnote block instead of inline."""
+    src = (
+        "def fib(n):      #: 1)\n"
+        "    a, b = 0, 1  #: 2) /\n"
+        "    return a     #: 3) / Hand back a.\n"
+        "\n"
+        "#: 1) Name it. / It takes n.\n"
+        "\n"
+        "#: 2) Start from zero and one.\n"
+    )
+    path = tmp_path / "fn.py"
+    path.write_text(src)
+
+    # Must not sys.exit with the mix-of-numbering error.
+    code_lines, beats1, beats2, _ = sc._build_all_beats(str(path), trace=False,
+                                                        every=False)
+    assert [b.narration for b in beats1] == ["Name it.", "", ""]
+    assert [b.narration for b in beats2] == [
+        "It takes n.", "Start from zero and one.", "Hand back a."]
+
+
+def test_footnote_empty_pass_one_matches_the_inline_spelling():
+    """A footnote must produce exactly the beats you would get by typing the
+    body inline after the 'N)' — that equivalence is the whole design."""
+    inline = "x = 2  #: 1) / Body text.\n"
+    footnoted = "x = 2  #: 1)\n\n#: 1) / Body text.\n"
+    assert resolve_footnotes(footnoted) == inline
+
+
 def test_footnote_label_orders_the_pass_it_is_numbered_in():
-    """The label keeps its 'N)' playback-order meaning, and — like any order
-    prefix — that is PER PASS: it lands on the writing side here, so only
-    that pass reorders. Number the walkthrough side inside the body if you
-    want it ordered too (exactly as when writing the text inline)."""
+    """The label keeps its 'N)' playback-order meaning. It lands on the
+    writing side here, and the walkthrough — carrying no number of its own —
+    follows that same order rather than reverting to source order. Number the
+    walkthrough side inside the body to give it a different one."""
     src = ("x = 2  #: 2)\n"
            "y = 3  #: 1)\n"
            "\n"
@@ -1068,9 +1593,10 @@ def test_footnote_label_orders_the_pass_it_is_numbered_in():
     code_lines, markers = parse(resolve_footnotes(src))
     beats1, beats2 = _two_pass_beats(code_lines, markers, [])
     assert [b.narration for b in beats1] == ["First write.", "Second write."]
-    assert [b.narration for b in beats2] == ["Second walk.", "First walk."]
+    assert [b.narration for b in beats2] == ["First walk.", "Second walk."]
     # ...and the reordered beat still reveals its own source line, not y's.
     assert beats1[0].highlight == 2   # footnote 1 sits on line 2 (y = 3)
+    assert beats2[0].highlight == 2
 
 
 @pytest.mark.parametrize("src", [
@@ -1470,10 +1996,14 @@ def test_highlight_color_reaches_the_band(tmp_path):
     assert dominant == (0x2A, 0x2D, 0x2E)
 
 
-THEME = Path(__file__).parent.parent / "data" / "numpy.theme"
+# The PACKAGED theme, not the copy that used to live in data/: that copy and
+# this one silently diverged (colors edited in one, `--style numpy` reading the
+# other), so these tests now exercise exactly the file that ships and the two
+# cannot drift apart again.
+THEME = Path(sc.THEME_DIR) / sc.BUILTIN_THEMES["numpy"]
 
 
-@pytest.mark.skipif(not THEME.exists(), reason="needs data/numpy.theme")
+@pytest.mark.skipif(not THEME.exists(), reason="needs the packaged numpy.theme")
 def test_load_theme_maps_a_ksyntax_theme_onto_pygments_tokens():
     style = sc.load_theme(str(THEME))
     assert style.background_color == "#F3F4F5"
@@ -1488,12 +2018,34 @@ def test_load_theme_maps_a_ksyntax_theme_onto_pygments_tokens():
     assert color(sc.Keyword) == "6730c5"                # the theme's "Keyword"
     assert color(sc.Keyword.Namespace) == "6730c5"      # Import
     assert color(sc.Operator) == "00622f"
-    assert color(sc.Name.Builtin) == "912583"           # print / range / len
+    assert color(sc.Name.Builtin) == "262680"           # print / range / len
     assert color(sc.String) == "008000"
     assert resolved[sc.Error]["bold"] is True           # bold flag honored
 
 
-@pytest.mark.skipif(not THEME.exists(), reason="needs data/numpy.theme")
+def test_load_theme_picks_up_an_edited_file_but_still_caches(tmp_path):
+    """Regression: keyed on the path alone, an edited theme stayed invisible
+    for the life of the process. Barely noticeable for a one-shot CLI run;
+    in a Jupyter kernel it meant every later %%snippet-cast rendered the
+    theme as it was when the kernel first read it, restart the only way out."""
+    path = tmp_path / "t.theme"
+    shutil.copy(THEME, path)
+    first = sc.load_theme(str(path))
+    assert first.styles[sc.Keyword] == "#6730C5"
+
+    # Same file, untouched -> still the cached class (per-frame resolution
+    # must not re-read and re-class the file, nor defeat _with_colors' cache).
+    assert sc.load_theme(str(path)) is first
+
+    data = json.loads(path.read_text())
+    data["text-styles"]["Keyword"]["text-color"] = "#FF0000"
+    path.write_text(json.dumps(data))
+    os.utime(path, (0, 0))          # force a distinct mtime, not a same-tick edit
+
+    assert sc.load_theme(str(path)).styles[sc.Keyword] == "#FF0000"
+
+
+@pytest.mark.skipif(not THEME.exists(), reason="needs the packaged numpy.theme")
 def test_load_theme_derives_a_highlight_color():
     """The format carries none, and pygments' unset default is a pale
     '#ffffcc' that reads badly on almost any background."""
@@ -1502,14 +2054,14 @@ def test_load_theme_derives_a_highlight_color():
     assert style.highlight_color != "#ffffcc"
 
 
-@pytest.mark.skipif(not THEME.exists(), reason="needs data/numpy.theme")
+@pytest.mark.skipif(not THEME.exists(), reason="needs the packaged numpy.theme")
 def test_load_theme_is_cached_per_path():
     """_render_code() resolves the style once per frame; re-reading and
     re-classing the file each time would also defeat _with_colors()' cache."""
     assert sc.load_theme(str(THEME)) is sc.load_theme(str(THEME))
 
 
-@pytest.mark.skipif(not THEME.exists(), reason="needs data/numpy.theme")
+@pytest.mark.skipif(not THEME.exists(), reason="needs the packaged numpy.theme")
 def test_style_accepts_a_theme_file_path():
     assert resolve_style_args(str(THEME), None)[0] == str(THEME)
     assert sc._resolve_style(str(THEME), None).background_color == "#F3F4F5"
@@ -1532,7 +2084,7 @@ def test_unreadable_theme_file_fails_at_parse_time(tmp_path):
 
 
 @pytest.mark.skipif(not (THEME.exists() and _rendering_available()),
-                    reason="needs data/numpy.theme, ffmpeg and a resolvable FONT_NAME")
+                    reason="needs the packaged numpy.theme, ffmpeg and a resolvable FONT_NAME")
 def test_build_renders_from_a_theme_file(tmp_path):
     src = tmp_path / "s.py"
     src.write_text("x = 1 #: Assign one.\n")
@@ -1554,7 +2106,47 @@ def test_numpy_theme_is_packaged_and_reachable_by_bare_name():
     assert packaged.is_file()
     style = sc._resolve_style("numpy", None)
     assert style.background_color == "#F3F4F5"
-    assert style is sc.load_theme(str(packaged))    # same cached class
+    # The shipped HIGHLIGHT_COLOR default recolors the band, so _resolve_style
+    # hands back a _with_colors() subclass rather than the theme class itself —
+    # but it must still derive from the SAME cached load_theme() class, and
+    # resolving twice must not mint a second one (invariant 13: _render_code()
+    # resolves per frame, so an uncached subclass would re-run StyleMeta).
+    assert issubclass(style, sc.load_theme(str(packaged)))
+    assert style is sc._resolve_style("numpy", None)
+
+
+def test_highlight_band_defaults_to_the_state_panel_background():
+    """The shipped default: the band behind the current line is the same
+    surface as the STATE box, and follows a per-run --state-bg-color."""
+    assert sc.HIGHLIGHT_COLOR == sc.HIGHLIGHT_PANEL
+    assert sc._resolve_style().highlight_color == sc.PANEL_BG
+    assert sc._resolve_style(panel_bg="#0d1117").highlight_color == "#0d1117"
+
+
+def test_highlight_color_overrides_still_win_over_the_panel_default():
+    # An explicit color, and the 'none' escape hatch back to the style's own.
+    assert sc._resolve_style(hl_color="#ff0000").highlight_color == "#ff0000"
+    own = sc._resolve_style(hl_color=None).highlight_color
+    assert own != sc.PANEL_BG
+
+
+def test_resolve_style_args_accepts_the_panel_highlight_spelling():
+    assert resolve_style_args("numpy", None, sc.HIGHLIGHT_PANEL)[2] == sc.HIGHLIGHT_PANEL
+    assert resolve_style_args("numpy", None, "PANEL")[2] == sc.HIGHLIGHT_PANEL
+    assert resolve_style_args("numpy", None, "none")[2] is None
+    with pytest.raises(ValueError, match="--highlight-color"):
+        resolve_style_args("numpy", None, "chartreuse")
+
+
+def test_plan_canvas_band_matches_the_panel_box_it_renders(tmp_path):
+    """End to end through the canvas, including a moved --state-bg-color."""
+    beat = Beat(revealed=None, highlight=1, narration="hi", state={"x": "1"})
+    cv = plan_canvas(["x = 1"], [beat], show_panel=True, subtitles=False)
+    assert cv.style.highlight_color.lower() == cv.panel.bg.lower()
+
+    moved = plan_canvas(["x = 1"], [beat], show_panel=True, subtitles=False,
+                        state_bg_color="#0d1117")
+    assert moved.style.highlight_color.lower() == "#0d1117" == moved.panel.bg.lower()
 
 
 def test_builtin_theme_names_are_listed_and_accepted():
@@ -1592,7 +2184,7 @@ def test_a_theme_file_cannot_shadow_a_registered_style_name(tmp_path, monkeypatc
     assert sc._resolve_style("monokai", None).background_color == "#272822"
 
 
-@pytest.mark.skipif(not THEME.exists(), reason="needs data/numpy.theme")
+@pytest.mark.skipif(not THEME.exists(), reason="needs the packaged numpy.theme")
 def test_theme_keywords_use_the_themes_keyword_color_not_controlflow():
     """Regression: THEME_TOKEN_MAP sent Token.Keyword to the theme's
     "ControlFlow" entry, so `def`/`for`/`return`/`as` all came out #aa0000.
@@ -1605,7 +2197,7 @@ def test_theme_keywords_use_the_themes_keyword_color_not_controlflow():
         assert resolved[token]["color"].lower() == "6730c5"
 
 
-@pytest.mark.skipif(not THEME.exists(), reason="needs data/numpy.theme")
+@pytest.mark.skipif(not THEME.exists(), reason="needs the packaged numpy.theme")
 def test_theme_leaves_user_written_names_as_plain_text():
     """Regression: Name.Function was mapped to the theme's "Function" entry,
     so the name after `def` came out #aa0000. KSyntaxHighlighting's Python
@@ -1623,7 +2215,7 @@ def test_theme_leaves_user_written_names_as_plain_text():
     assert resolved[sc.Name.Builtin]["color"].lower() != plain
 
 
-@pytest.mark.skipif(not THEME.exists(), reason="needs data/numpy.theme")
+@pytest.mark.skipif(not THEME.exists(), reason="needs the packaged numpy.theme")
 def test_theme_colors_a_real_snippet_token_by_token():
     """End-to-end through the lexer, which is the only way to catch a mapping
     that is individually plausible but wrong for the token pygments actually
@@ -1641,6 +2233,6 @@ def test_theme_colors_a_real_snippet_token_by_token():
     assert got == {
         "def": "6730c5", "fib": "000000", "(": "000000", "n": "000000",
         ")": "000000", ":": "000000", "for": "6730c5", "_": "000000",
-        "in": "6730c5", "range": "912583", "pass": "6730c5",
+        "in": "6730c5", "range": "262680", "pass": "6730c5",
         "import": "6730c5", "numpy": "000000", "as": "6730c5", "np": "000000",
     }

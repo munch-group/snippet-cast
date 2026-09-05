@@ -37,13 +37,17 @@ pixi run snippet-cast test/data/fib.py  -o out.mp4 --no-trace                # c
 pixi run snippet-cast test/data/twopass.py -o out.mp4 --tts silent --subtitles   # two-pass ('/' in narration)
 pixi run snippet-cast test/data/footnote.py -o out.mp4 --tts silent --subtitles  # footnote bodies ('#: N)')
 pixi run snippet-cast test/data/twopass.py --export-script                      # narration script to record
+pixi run snippet-cast test/data/plain.py -o out.mp4 --pause 2                   # NO '#:' at all: 2s silent frame per line
 
 # theme / background (per run — no source edit needed)
 pixi run snippet-cast --style list                                              # every valid --style name
 pixi run snippet-cast test/data/fib.py -o out.mp4 --tts silent --style github-dark --bg-color none
 pixi run snippet-cast test/data/fib.py -o out.mp4 --tts silent --style light-modern --bg-color none
 pixi run snippet-cast test/data/fib.py -o out.mp4 --tts silent --style dark-modern --highlight-color '#2a2d2e'
-pixi run snippet-cast test/data/fib.py -o out.mp4 --tts silent --style data/numpy.theme --bg-color none
+pixi run snippet-cast test/data/fib.py -o out.mp4 --tts silent --font-size 40           # bigger text
+pixi run snippet-cast test/data/fib.py -o out.mp4 --tts silent --screenflow             # 1920x1080, content centred
+pixi run snippet-cast test/data/fib.py -o out.mp4 --tts silent --screenflow 1280x720 --font-size 40
+pixi run snippet-cast test/data/fib.py -o out.mp4 --tts silent --style src/snippet_cast/themes/numpy.theme --bg-color none
 SNIPPET_CAST_STYLE=nord pixi run snippet-cast test/data/fib.py -o out.mp4 --tts silent
 
 # real voices (see SETUP.md)
@@ -72,7 +76,7 @@ manual recipe used to sanity-check rendered video output.
 | `src/snippet_cast/__init__.py` | Public API: exports `build` (programmatic), `export_script`, `record_narration`, and `main` (CLI entry point). |
 | `src/snippet_cast/magic.py` | Jupyter `%%snippet-cast` cell magic (`pip install snippet-cast[jupyter]`; both `import snippet_cast` and `import snippet_cast.magic` auto-register it inside a live kernel, or use `%load_ext snippet_cast.magic`). `__init__.py` only imports it conditionally — behind the same `get_ipython()`-gated check `magic.py` itself uses — so `import snippet_cast` outside a live kernel, or without IPython installed, still never requires IPython. It's a thin wrapper: writes the cell to a temp `.py` file, calls `build()`/`export_script()`/`record_narration()`, displays the result with `IPython.display.Video`. `--record`'s `input()` prompts work the same in a notebook cell as a terminal — no special-casing needed. |
 | `SETUP.md` | How to configure every TTS backend (`say`, `manual`/`--record`, Piper, ElevenLabs). |
-| `test/data/fib.py`, `test/data/loop.py`, `test/data/twopass.py`, `test/data/footnote.py` | Sample annotated snippets used by tests and for manual verification (`twopass.py` exercises `/`-split, two-pass narration; `footnote.py` exercises `#: N)` footnote bodies). |
+| `test/data/fib.py`, `test/data/loop.py`, `test/data/twopass.py`, `test/data/footnote.py`, `test/data/plain.py` | Sample snippets used by tests and for manual verification (`twopass.py` exercises `/`-split, two-pass narration; `footnote.py` exercises `#: N)` footnote bodies; `plain.py` carries NO narration at all, for the `--pause`-only silent render). |
 | `test/test_screencast.py` | Automated tests: parsing, tracing, beat construction, and a full-render smoke test. |
 | `*.mp4` | Generated outputs (not source; safe to delete / gitignore). |
 
@@ -168,6 +172,19 @@ default). `build()`/`export_script()` call it once for single-pass mode
 (texts = each marker's whole `.text`); `_two_pass_beats()` calls it twice,
 once per split-off pass, so pass 1 and pass 2 can use independent orders.
 
+**A walkthrough pass with no numbering of its own INHERITS the writing
+pass's order** rather than falling back to source order. `#: 2) Write it /
+Explain it` is how people naturally write this — the number goes once, on
+the pass that has one — and ordering only pass 1 made the video jump around
+while writing and then march top-to-bottom while explaining. Numbering pass
+2 explicitly (`/ 4) text`) still overrides it, and a file numbering neither
+pass is untouched. The inheritance is done at the ORDER level in
+`_two_pass_beats()` (rank pass 2's markers by their position in pass 1's
+result), NOT by rewriting pass 2's text: its texts stay unnumbered, so
+`order_markers()` never sees a mix and its all-or-none check is unaffected.
+Re-attaching the label to pass 2's *text* was tried once and was a real bug
+— see the footnote section's warning.
+
 Reordering reveals genuinely out of order — it does NOT force code to appear
 as a growing top-down prefix. `_reveal_groups(code_lines, markers)` partitions
 [1, last marker's line] into one contiguous, non-overlapping group per marker
@@ -232,10 +249,66 @@ a file whose walkthrough pass was otherwise unnumbered tripped
 `order_markers()`'s all-or-none check. Don't reintroduce it — number the
 walkthrough side inside the body (`/ 2) text`) if it needs ordering.
 
+**The mirror-image bug, also fixed:** the re-emit must KEEP the separator
+whenever either side carried one, even when pass 1 comes out empty. The
+original `if part1:` test dropped it, so a reference reading `#: 3)` plus a
+body of `#: 3) / Start from...` (equally, `#: 3) /` plus a plain body) was
+rewritten to `3) Start from...` — which re-parses as an unnumbered pass 1 and
+a pass 2 numbered 3, i.e. the label jumping passes. In exactly the file the
+paragraph above describes (every writing line numbered, every walkthrough
+line not) that tripped the same all-or-none check, so a footnote written like
+all its neighbours failed with the mix-of-numbering error. The invariant to
+hold onto is the one in the paragraph above: a footnote must produce exactly
+the beats you would get by typing the body inline after the `N)` — pinned by
+`test_footnote_empty_pass_one_matches_the_inline_spelling`.
+
 Inheriting the order prefix also inherits `--every` rejection. After removing
 a block the transform strips trailing blank lines it left behind —
 `plan_canvas()` sizes every frame from the full code and `_render_code()`
 keeps blank rows (invariant 12), so they'd add dead height to the whole video.
+
+#### Unnarrated snippets: `--pause` as the frame length (orthogonal to everything above)
+
+A snippet with **no `#:` comments at all** normally exits with "No narration
+found". Passing `--pause SECONDS` explicitly opts into rendering it anyway, as
+a silent, evenly paced video — one progressively revealed frame per code line,
+each held for exactly `pause` seconds — to narrate afterwards in a video
+editor (ScreenFlow and friends). `build(allow_unnarrated=True)` is the
+programmatic switch; `_build_all_beats()` returns whether it fired, and
+`_render_from_beats(unnarrated=True)` is what honors it.
+
+The trigger is **`--pause` being given explicitly, not its resolved value**:
+`PAUSE_DEFAULT` is 0.8, so a resolved-value test could not tell "hold each
+frame this long" apart from "I never mentioned `--pause`" — and a forgotten
+`#:` must keep reporting the error rather than silently rendering. `main()`
+and `magic.py` each capture `pause_explicit` (`args.pause is not None or
+os.environ.get("SNIPPET_CAST_PAUSE") is not None`) BEFORE
+`resolve_env_defaults()` fills the fallback in, exactly like the neighbouring
+`tts_explicit`/`manual_dir_explicit`. `build()` then ANDs it with `pause > 0`
+before passing it down, so `--pause 0` (which would mean zero-length clips,
+which ffmpeg's `concat` rejects) is refused by the same message *before*
+`trace_run()` executes the snippet, not after.
+
+`_auto_markers(code_lines)` builds the stand-in markers: one empty-text
+`Marker` per code line. Comment-only lines deliberately get **no marker of
+their own** — `_reveal_groups()` already reveals an unmarked line together
+with the next marked one, so a comment appears with the code it describes
+instead of costing a beat that would blank the state panel (a comment line has
+no trace `Step`). The **last non-blank line always gets one** regardless,
+because `_reveal_groups()` never assigns lines after the final marker to any
+group, so a trailing comment block would otherwise stay invisible for the
+whole video; when that last line is a comment its marker is `has_code=False`,
+i.e. an ordinary outro beat.
+
+Rendering: in the single-pass loop each beat is ONE `make_pause_clip(hold,
+pause)` and **no separate trailing gap clip** — `pause` is the beat's whole
+length here, so appending the usual gap on top would make every frame
+`2*pause`. `synth` is never called, so no TTS backend is needed whatever
+`--tts` says. Two-pass mode can't be reached (it needs a `/` in a marker, and
+there are no markers), so only the single-pass path handles it. `--typing`,
+`--every` and `--no-trace` all compose normally; `--subtitles` prints a
+no-effect note. `--export-script` and `--record` never opt in — they exist to
+produce or record narration, so a file with none stays an error there.
 
 #### Inline pauses within a narration line (orthogonal to everything above)
 
@@ -314,6 +387,25 @@ combinations:
 3. **Trace post-state is captured on the *next* same-frame line event** (or the
    frame's return), not on the line itself — see `trace_run`. That deferral is
    why "state after line L runs" is correct, including nested-call side effects.
+
+   **The one exception is a `def` line**, which gets a second, synthesized
+   `Step(call_entry=True)` from the `call` event, holding the parameters as
+   just bound (defaults included). Without it a `def` line's only step is the
+   module-level one for executing the def STATEMENT — whose post-state
+   contains no parameters at all — so highlighting `def fib(n):` showed an
+   empty panel and `n` only appeared once the first body line was
+   highlighted. `build_beats()`'s first-exec `first` map prefers the
+   call-entry step over the statement one (first call wins, so recursion
+   shows the outermost frame).
+
+   These steps are consumed ONLY there. `build_beats()` filters them into
+   `line_steps` for everything else, because their locals belong to the
+   CALLEE's frame: `env_before()` would report them as the caller's scope,
+   and `--every` would gain a beat per call. Frames with no `def` header of
+   their own are skipped by a `co_name.startswith("<")` test — `<module>`,
+   `<listcomp>`, `<genexpr>`, `<dictcomp>`, `<lambda>`. Note `co_firstlineno`
+   points at the first DECORATOR for a decorated function, so the parameters
+   would attach there rather than to the `def` line.
 4. **Loop-header exit beat suppression** (`--every`): a marked `for`/`while` line
    fires one extra time when the loop exhausts. `build_beats` drops it using
    `loop_body_ranges()` (AST) + `frame_id` — the exit check's next same-frame step
@@ -334,12 +426,17 @@ combinations:
    thread two-pass-only conditionals into the legacy single-pass loop; keep
    the two code paths separate (see `_render_two_pass()` vs. the loop at the
    end of `build()`).
-10. **A pass-1 "writing" clip's video is never shorter than its narration
-    audio.** `make_pass1_code_clip()` sizes frame count from
-    `ceil(duration * FPS)` (rounding up), so `make_typing_clip`'s `-shortest`
-    only ever trims a sliver of excess video — it must never truncate real
-    narration. Only the *silent* (empty part1) sub-case is capped by
-    `TYPE_MAXFRAMES`; the narrated sub-case is deliberately uncapped.
+10. **A pass-1 "writing" clip lasts `max(typed reveal, narration)` — neither
+    stream is ever cut.** `make_pass1_code_clip()` sizes frame count from
+    `ceil(duration * FPS)` (rounding up) so the video is never shorter than
+    the audio; `make_typing_clip()` adds `apad` to the real-audio input so
+    `-shortest` lands on the VIDEO rather than the audio, and the frames are
+    never dropped either. Both halves are load-bearing and were bugs in turn:
+    without the frame floor a long narration got truncated; without `apad` a
+    line whose typing needed longer than its narration stopped mid-word and
+    the next clip's fully-typed frame made the rest look typed in an instant.
+    Only the *silent* (empty part1) sub-case is capped by `TYPE_MAXFRAMES`;
+    the narrated sub-case is deliberately uncapped.
 11. **`Beat.revealed` in first-exec mode is a running union of `_reveal_groups()`
     groups, not a `m.line_no` cutoff** (`build_beats()`'s `not every` branch).
     This is what lets `order_markers()` narrate lines genuinely out of source
@@ -433,9 +530,10 @@ is always the Nth call to the manual backend).
 
 `build()`, `export_script()`, and `record_narration()` all share one parse ->
 two-pass-detect -> validate -> trace -> beats preamble, `_build_all_beats(source_path,
-trace, every) -> (code_lines, beats1, beats2)` — the single source of truth for
-two-pass detection and the `every`+two-pass / `every`+order-prefix validation
-`sys.exit`s. `build()`'s render half (everything after that preamble) is its
+trace, every, allow_unnarrated=False) -> (code_lines, beats1, beats2, unnarrated)`
+— the single source of truth for two-pass detection, the `every`+two-pass /
+`every`+order-prefix validation `sys.exit`s, and the no-narration
+`sys.exit`/opt-in (see "Unnarrated snippets" below). `build()`'s render half (everything after that preamble) is its
 own function, `_render_from_beats(code_lines, beats1, beats2, out_path, tts,
 synth, trace, every, subtitles, typing, typing_speed, pause)` — `build()` is
 just `_build_all_beats()` then `_render_from_beats()`. This split exists so
@@ -683,15 +781,45 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   or `build(state_bg_color=..., state_fg_color=...)`) —
   `resolve_panel_args()`/`_panel_colors()`/`PanelColors`. See the theme bullet
   below for why `--state-fg-color` covers names and values together.
+- **Output resolution** is DERIVED, not set: `W = even(PAD + code_w + [GAP +
+  panel_w] + PAD)`, `H = even(PAD + code_h + PAD + cap_h)`. Steer it with
+  `--font-size`, `--no-trace` (drops the panel) and `--subtitles`, or fix it
+  outright with `--screenflow` (below). Note width and height are not
+  independent once `--subtitles` is on: `--no-trace` narrows the canvas, so
+  captions wrap onto more lines and the video gets TALLER.
 - **Recolor the highlight band:** `--highlight-color '#rrggbb'`
-  (`SNIPPET_CAST_HIGHLIGHT_COLOR`, `build(highlight_color=...)`, default
-  `HIGHLIGHT_COLOR = None` = the style's own). Applied through
-  `_resolve_style()`/`_with_colors()` like `--bg-color`, which is what keeps
-  pygments' band and `_tighten_highlight()`'s repainted edges the same color
-  — overriding only one would leave two-tone edges. Worth setting for any
-  style that declares no `highlight_color`: pygments' unset default is a pale
-  `#ffffcc`, and **both** shipped `Style` classes are in that boat, so
-  `--style dark-modern` alone gives a pale-yellow band.
+  (`SNIPPET_CAST_HIGHLIGHT_COLOR`, `build(highlight_color=...)`). Applied
+  through `_resolve_style()`/`_with_colors()` like `--bg-color`, which is what
+  keeps pygments' band and `_tighten_highlight()`'s repainted edges the same
+  color — overriding only one would leave two-tone edges.
+
+  **The shipped default is `HIGHLIGHT_COLOR = HIGHLIGHT_PANEL` (`"panel"`),
+  which tracks the STATE panel background** so the band behind the current
+  line and the STATE box read as one surface — and it tracks the *resolved*
+  one, so `--state-bg-color` carries the band with it. That is why
+  `plan_canvas()` resolves the panel BEFORE the style and passes
+  `panel_bg=panel.bg` down; `_resolve_style()` does the substitution (falling
+  back to the `PANEL_BG` global for standalone callers with no canvas), which
+  keeps it the single choke point and makes the call idempotent — a concrete
+  color passed in comes back unchanged.
+
+  Two consequences of that default. First, `PANEL_BG` now sets two surfaces,
+  so the "must stay a visible step away from the page background" rule below
+  governs the band as well. Second, `_resolve_style()` now ALWAYS applies an
+  override, so it always returns a `_with_colors()` subclass rather than the
+  style class itself — a test asserting `is load_theme(...)` had to become
+  `issubclass` (it also pins that resolving twice returns one cached class,
+  since `_render_code()` resolves per frame).
+
+  `'none'` is the escape hatch back to the style's own; that matters for a
+  style declaring no `highlight_color`, since pygments' unset default is a
+  pale `#ffffcc` and **both** shipped `Style` classes are in that boat — so
+  `--style dark-modern --highlight-color none` gives a pale-yellow band,
+  where plain `--style dark-modern` now gets the panel color. The CLI can
+  tell "not given" from `'none'` because `resolve_env_defaults()`'s fallback
+  is the `HIGHLIGHT_COLOR` global (the literal `"panel"`) while `'none'`
+  maps to Python `None` — `_hex_color_arg()` grew an `allow=` list so the
+  `"panel"` spelling passes validation.
 - **Use a Pandoc/KDE `.theme` file:** `--style path/to/x.theme` —
   `load_theme()` maps its `text-styles` onto pygments tokens via
   `THEME_TOKEN_MAP` — **the one place the two token vocabularies meet, and
@@ -728,8 +856,24 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
 
   The format has no highlight color, so one is derived by nudging the
   background `THEME_HL_MIX` toward black or white (per `_is_light`) rather
-  than inheriting pygments' pale default. `load_theme()` is `lru_cache`d on
-  the path because `_render_code()` resolves the style once per *frame*.
+  than inheriting pygments' pale default. `load_theme()` is cached on the path
+  **plus the file's mtime/size** (`_theme_stamp()`) because `_render_code()`
+  resolves the style once per *frame*. The stamp is not optional: keyed on the
+  path alone, an edited `.theme` stayed invisible for the life of the process
+  — a shrug for a one-shot CLI run, but in a Jupyter kernel every later
+  `%%snippet-cast` kept rendering the theme as it was when the kernel first
+  read it, with a restart the only way out.
+
+  **There is exactly ONE `numpy.theme`**, at `src/snippet_cast/themes/` — the
+  only location `pyproject.toml`'s `package-data` ships. `data/numpy.theme` is
+  a SYMLINK to it, kept because that is the path people reach for when
+  editing; the tests load the packaged path. It used to be a second real file,
+  and the two silently diverged twice in one session — colors edited in
+  `data/` while `--style numpy` read `src/`, with no error, just an unchanged
+  video. Don't turn it back into a copy. (`build/lib/.../numpy.theme` is a
+  stale setuptools artifact, not a source; it is what `pip install .` copies
+  into site-packages, where it can shadow `src/` entirely — `pixi run`
+  re-syncs the editable install and clears that.)
 - **Change theme/background:** a per-run option, not a source edit —
   `--style NAME` / `--bg-color '#rrggbb'` on the CLI and the cell magic,
   `SNIPPET_CAST_STYLE` / `SNIPPET_CAST_BG_COLOR` as env vars, or
@@ -806,8 +950,11 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   padding on all four sides; raising `HL_PAD` alone would widen every frame,
   since the same value sets the side margins `_render_code()` adds (see
   invariants 15 and 16).
-  Edit `FONT_NAME`/`FONT_SIZE` (code) and `PANEL_FONT_SIZE` (state
-  panel) for font changes — `PANEL_FONT_SIZE` is defined as `FONT_SIZE`, so
+  Font SIZE is a per-run option like the colors — `--font-size PX`,
+  `SNIPPET_CAST_FONT_SIZE`, `build(font_size=)` — see the dedicated bullet
+  below; `FONT_SIZE`/`PANEL_FONT_SIZE` remain the *defaults* it falls back
+  to, and `FONT_NAME` (the typeface) is still a source edit only.
+  `PANEL_FONT_SIZE` is defined as `FONT_SIZE`, so
   the panel's name/value text mirrors the code by default and only needs its
   own literal if you deliberately want them to differ (`GAP` is the px
   separation between the code column and the panel); panel background/text
@@ -821,10 +968,101 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   exist — add paths to `_FONT_CANDIDATES` for a new platform/font rather than
   relying on `FONT_NAME` alone, since pygments resolves bare names against
   the OS's installed fonts (e.g. "DejaVu Sans Mono" isn't a stock macOS font).
+- **Change the code font size:** `--font-size PX` (`SNIPPET_CAST_FONT_SIZE`,
+  `build(font_size=...)`, default `FONT_SIZE`). Resolved ONCE per render by
+  `_font_sizes()` into a `FontSizes` carried on `Canvas.fonts` — same
+  "resolve once, every frame draws from it" rule as `Canvas.style` and
+  `Canvas.panel` (invariant 13), and here it is load-bearing for invariant 1
+  too: `plan_canvas()` *measures* the canvas at this size, so a frame drawn
+  at any other size would not fit the dimensions it fixed. `_render_code()`
+  and `render_panel()` therefore take the size as an argument and must never
+  read the `FONT_SIZE`/`PANEL_FONT_SIZE` globals again.
+
+  `--font-size` sets the CODE size; the panel, the caption and the panel
+  header each keep the OFFSET they have from `FONT_SIZE` in the module
+  constants, so the frame scales as one piece and a `PANEL_FONT_SIZE`
+  deliberately edited to differ stays that much apart instead of being
+  flattened into a mirror. `font_size=None` — and, equivalently, exactly
+  `FONT_SIZE` — reproduces the constants unchanged, which is what keeps
+  every pre-existing render byte-identical (pinned by
+  `test_render_at_default_font_size_is_byte_identical`). The caption/header
+  readability floors (14/12) are additionally capped at the size they are
+  subordinate to, so a tiny `--font-size` can't leave the caption larger
+  than the code it captions.
+
+  `FontSizes`'s fields deliberately have NO defaults: a default evaluated in
+  the class body would freeze the constants as of IMPORT time and silently
+  ignore a later `sc.FONT_SIZE = 40` (a documented notebook workaround).
+  Build one only through `_font_sizes()`.
+
+  Adding this also taught `_env_default()` about `int` — note the `bool`
+  branch must stay FIRST, since `isinstance(True, int)` is True and an int
+  branch ahead of it would turn every boolean flag's env var into
+  `int("true")`.
+- **Render onto a fixed frame:** `--screenflow [WxH]` (`SNIPPET_CAST_SCREENFLOW`,
+  `build(screenflow=(w, h))`, bare flag / truthy env var = `SCREENFLOW_SIZE`,
+  1920x1080). Named for the workflow it exists for: producing a clip that
+  drops straight onto a video-editor timeline, which needs BOTH a fixed
+  resolution and the content centred in it — hence one flag, not a
+  `--resolution` plus a `--center`.
+
+  `plan_canvas()` measures the natural content-sized canvas **first**, exactly
+  as without the flag, and only then pads out to the target. Measuring first
+  is load-bearing: caption wrapping uses the natural width, so the caption
+  band's height (and the beats' wrapped lines) stay identical to the unpadded
+  render instead of re-flowing to the wider frame.
+
+  Nothing is ever SCALED — the content block keeps its natural size and is
+  centred, so text stays crisp. Pair it with `--font-size` to actually fill a
+  large frame. A snippet whose natural canvas exceeds the target raises
+  `ValueError` naming a `--font-size` that would fit, rather than shrinking
+  silently; `_plan_canvas_or_exit()` turns that into a clean exit for the
+  three render paths. It is the one look option that CANNOT be validated at
+  parse time — it depends on the measured canvas, hence on the beats, hence
+  on `trace_run()` having already run.
+
+  `Canvas` therefore carries the content block (`cw`/`ch`) and its offset
+  (`off_x`/`off_y`) alongside the frame (`W`/`H`). **Everything positional
+  draws off the block, never off `W`/`H`** — `compose()`'s code and panel
+  pastes and all of `_draw_caption()` (band top, rule extent, text centring).
+  Without the flag they are `(W, H)` at `(0, 0)`, so every existing render is
+  byte-identical (pinned by
+  `test_screenflow_frame_keeps_the_content_pixel_identical`, which crops the
+  padded frame back to the block and compares pixels). Reintroducing a
+  `cv.W - PAD` into the caption drawing would stretch the rule to the
+  letterbox edges the moment `--screenflow` is used.
+
+  The value is OPTIONAL (`nargs="?"` + `const`, verified to survive IPython's
+  `parse_argstring`, not just plain argparse), which means
+  `snippet-cast --screenflow in.py` hands the input file to the flag and
+  leaves `input` empty. `resolve_screenflow_arg()` detects that shape and says
+  so; `main()` resolves it BEFORE its missing-input check specifically so that
+  hint wins over argparse's generic "required: input".
 - **Change the narration marker:** `MARKER` (keep it a valid `#` comment prefix).
-- **Adjust typing speed:** default is `TYPE_SPEED` (seconds/char), overridable
-  per-run with `--typing-speed`; `TYPE_MAXFRAMES` is a safety cap on frames
-  per beat regardless of speed.
+- **Adjust typing speed:** default is `TYPE_SPEED` (seconds/char, currently
+  `0.1`), overridable per-run with `--typing-speed`. There is only ONE
+  constant: both legacy `--typing` (`typing_frames()`) and two-pass mode's
+  writing pass (`make_pass1_code_clip()`) default their `typing_speed`
+  parameter to it, and both front ends fall back to it — so the two modes
+  cannot drift apart.
+
+  `TYPE_MAXFRAMES` is a safety cap on frames per beat regardless of speed,
+  and it silently bounds the speed that can actually be DELIVERED: a beat
+  types for at most `TYPE_MAXFRAMES / FPS` = 15s, so a reveal group longer
+  than `15 / TYPE_SPEED` characters (150 at the default) is compressed to fit
+  rather than paced at `TYPE_SPEED`. It is set to cover a 150-char line on
+  pace; none of the shipped samples comes close.
+
+  Raising it is cheap because a clip is `max(typing, narration)` long: when
+  narration is the longer stream — the normal case for a real screencast —
+  a bigger cap changes the typing's PACING but not the video's duration or
+  size at all (`footnote.py` renders identically at 150 and 450 frames:
+  46.9s, 0.30 MB). It only stretches the video where typing genuinely
+  outruns the narration. Cost is otherwise linear at ~9ms and ~14KB of temp
+  PNG per frame, and temp frames live until `concat()`. The `%03d` frame
+  naming is NOT a 999-frame ceiling — Python's `:03d` is a minimum width and
+  ffmpeg's pattern matches the same way (verified past 1000), which matters
+  because the narration floor can already push a pass-1 sequence beyond it.
 - **Two-pass narration:** add `/` to a `#:` narration (`split_narration`);
   first-exec only, auto-detected, no flag needed. `TWO_PASS_SEP` changes the
   separator character; `PART2_EMPTY_HOLD` is how long the walkthrough pass

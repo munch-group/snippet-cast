@@ -1,4 +1,5 @@
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -6,7 +7,9 @@ import pytest
 
 import snippet_cast
 import snippet_cast.magic as sc_magic
-from snippet_cast.screencast import FONT_NAME, FONT_SIZE, _mono_font_path
+import snippet_cast.screencast as sc_screencast
+from snippet_cast.screencast import (
+    FONT_NAME, FONT_SIZE, SCREENFLOW_SIZE, _mono_font_path)
 
 DATA = Path(__file__).parent / "data"
 FIB = DATA / "fib.py"
@@ -105,6 +108,81 @@ def test_cell_magic_reports_clean_error_on_empty_cell(ip, capsys):
 
     assert result.success  # the magic itself must not raise/crash the cell
     assert "No narration found" in capsys.readouterr().err
+
+
+def test_cell_magic_renders_unnarrated_cell_when_pause_is_given(ip, tmp_path):
+    out = tmp_path / "silent.mp4"
+    result = ip.run_cell(
+        f"%%snippet-cast -o {out} --pause 1\n"
+        "# no narration here\n"
+        "value = 21 * 2\n")
+
+    assert result.success
+    assert out.exists()
+
+
+def test_cell_magic_renders_unnarrated_cell_with_every(ip, tmp_path):
+    out = tmp_path / "loop.mp4"
+    # --typing-speed is inert under --every and must not break the pacing.
+    result = ip.run_cell(
+        f"%%snippet-cast -o {out} --pause 2 --typing-speed 2 --every\n"
+        "x = 0\n"
+        "for i in range(3):\n"
+        "    x += i\n")
+
+    assert result.success
+    assert out.exists()
+    assert sc_screencast.probe_duration(str(out)) == pytest.approx(7 * 2, abs=0.15)
+
+
+def test_cell_magic_accepts_font_size(ip, tmp_path):
+    out = tmp_path / "big.mp4"
+    result = ip.run_cell(
+        f"%%snippet-cast -o {out} --tts silent --font-size {FONT_SIZE + 14}\n"
+        "x = 1 #: one line\n")
+
+    assert result.success
+    assert out.exists()
+
+
+def test_cell_magic_rejects_a_too_small_font_size(ip, capsys):
+    result = ip.run_cell("%%snippet-cast --font-size 2\nx = 1 #: one line\n")
+
+    assert result.success  # the magic itself must not raise/crash the cell
+    assert "--font-size must be >=" in capsys.readouterr().err
+
+
+def test_cell_magic_screenflow_renders_an_exact_frame(ip, tmp_path):
+    out = tmp_path / "sf.mp4"
+    result = ip.run_cell(
+        f"%%snippet-cast -o {out} --tts silent --screenflow 1280x720\n"
+        "x = 1 #: one line\n")
+
+    assert result.success
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=width,height",
+         "-of", "csv=p=0", str(out)], capture_output=True, text=True, check=True)
+    assert probe.stdout.strip().splitlines()[0] == "1280,720"
+
+
+def test_cell_magic_screenflow_bare_flag_uses_the_default_frame(ip, tmp_path):
+    out = tmp_path / "sf.mp4"
+    result = ip.run_cell(
+        f"%%snippet-cast -o {out} --tts silent --screenflow --font-size 20\n"
+        "x = 1 #: one line\n")
+
+    assert result.success
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=width,height",
+         "-of", "csv=p=0", str(out)], capture_output=True, text=True, check=True)
+    assert probe.stdout.strip().splitlines()[0] == SCREENFLOW_SIZE.replace("x", ",")
+
+
+def test_cell_magic_reports_a_bad_screenflow_value(ip, capsys):
+    result = ip.run_cell("%%snippet-cast --screenflow huge\nx = 1 #: one line\n")
+
+    assert result.success  # the magic itself must not raise/crash the cell
+    assert "expected WxH" in capsys.readouterr().err
 
 
 def test_cell_magic_record_rejects_conflicting_tts(ip, capsys):

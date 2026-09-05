@@ -63,7 +63,11 @@ from .screencast import (
     BG_COLOR_NONE,
     BUILTIN_STYLES,
     BUILTIN_THEMES,
+    FONT_SIZE,
+    FONT_SIZE_MIN,
+    SCREENFLOW_SIZE,
     HIGHLIGHT_COLOR,
+    HIGHLIGHT_PANEL,
     MANUAL_AUDIO_DIR_DEFAULT,
     PANEL_BG,
     PAUSE_DEFAULT,
@@ -75,6 +79,7 @@ from .screencast import (
     resolve_env_defaults,
     resolve_output_path,
     resolve_panel_args,
+    resolve_screenflow_arg,
     resolve_style_args,
 )
 
@@ -203,8 +208,21 @@ class SnippetCastMagics(Magics):
                    f"[default: {BG_COLOR}; env: SNIPPET_CAST_BG_COLOR]")
     @argument("--highlight-color", default=None, metavar="HEX",
               help="band behind the highlighted code line as '#rrggbb', "
-                   f"overriding the style's own; {BG_COLOR_NONE!r} uses the "
-                   "style's [env: SNIPPET_CAST_HIGHLIGHT_COLOR]")
+                   f"overriding the style's own; {HIGHLIGHT_PANEL!r} matches "
+                   "the STATE panel background (so the two read as one "
+                   f"surface), {BG_COLOR_NONE!r} uses the style's "
+                   f"[default: {HIGHLIGHT_COLOR}; env: SNIPPET_CAST_HIGHLIGHT_COLOR]")
+    @argument("--screenflow", nargs="?", const=SCREENFLOW_SIZE,
+              default=None, metavar="WxH",
+              help="render onto a fixed frame of this size with the content "
+                   "centred, instead of a canvas sized to the snippet — for "
+                   "dropping straight onto a video-editor timeline. Nothing is "
+                   "scaled, so text stays crisp "
+                   f"[bare flag: {SCREENFLOW_SIZE}; env: SNIPPET_CAST_SCREENFLOW]")
+    @argument("--font-size", type=int, default=None, metavar="PX",
+              help="code font size in pixels; the state panel and captions "
+                   "scale with it, each keeping its own offset "
+                   f"[default: {FONT_SIZE}; env: SNIPPET_CAST_FONT_SIZE]")
     @argument("--state-bg-color", default=None, metavar="HEX",
               help="background of the state panel as '#rrggbb'; "
                    f"{BG_COLOR_NONE!r} keeps the default "
@@ -215,7 +233,10 @@ class SnippetCastMagics(Magics):
                    "default scheme [env: SNIPPET_CAST_STATE_FG_COLOR]")
     @argument("--pause", type=float, default=None, metavar="SECONDS",
               help="seconds of silence held on each beat's frame after its "
-                   "narration (in two-pass mode, also between the two passes) "
+                   "narration (in two-pass mode, also between the two passes); "
+                   "giving this explicitly also allows a cell with NO '#:' "
+                   "narration at all, rendering one silent frame per code line "
+                   "held for this long, to narrate later "
                    f"[default: {PAUSE_DEFAULT}; env: SNIPPET_CAST_PAUSE]")
     @argument("--manual-audio-dir", default=None, metavar="DIR",
               help="directory of pre-recorded audio for --tts manual "
@@ -246,6 +267,12 @@ class SnippetCastMagics(Magics):
         tts_explicit = args.tts is not None or os.environ.get("SNIPPET_CAST_TTS") is not None
         manual_dir_explicit = (args.manual_audio_dir is not None
                                or os.environ.get("SNIPPET_CAST_MANUAL_AUDIO_DIR") is not None)
+        # Same trick for --pause: asking for a specific frame length is what
+        # opts a narration-less cell into a silent render — PAUSE_DEFAULT is
+        # > 0, so the resolved value can't tell that apart from a forgotten
+        # '#:', which must still report No narration found.
+        pause_explicit = (args.pause is not None
+                          or os.environ.get("SNIPPET_CAST_PAUSE") is not None)
         resolve_env_defaults(
             args, tts="silent", no_trace=False, every=False, subtitles=False,
             typing=False, typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT, export_script=False,
@@ -253,14 +280,20 @@ class SnippetCastMagics(Magics):
             name="out", output_dir=".", style=STYLE,
             bg_color=BG_COLOR if BG_COLOR else BG_COLOR_NONE,
             state_bg_color=PANEL_BG, state_fg_color=None,
-            highlight_color=HIGHLIGHT_COLOR)
+            highlight_color=HIGHLIGHT_COLOR, font_size=FONT_SIZE,
+            screenflow=None)
         try:
             args.style, args.bg_color, args.highlight_color = resolve_style_args(
                 args.style, args.bg_color, args.highlight_color)
             args.state_bg_color, args.state_fg_color = resolve_panel_args(
                 args.state_bg_color, args.state_fg_color)
+            args.screenflow = resolve_screenflow_arg(args.screenflow)
         except ValueError as e:
             print(f"snippet-cast: {e}", file=sys.stderr)
+            return
+        if args.font_size < FONT_SIZE_MIN:
+            print(f"snippet-cast: --font-size must be >= {FONT_SIZE_MIN}.",
+                  file=sys.stderr)
             return
         if args.tts not in BACKENDS:
             print(f"snippet-cast: --tts: invalid choice {args.tts!r} "
@@ -305,6 +338,7 @@ class SnippetCastMagics(Magics):
                             subtitles=args.subtitles, typing=args.typing,
                             typing_speed=args.typing_speed, pause=args.pause,
                             show_frame=not args.no_frame, frame_fn=view,
+                            font_size=args.font_size, screenflow=args.screenflow,
                             style=args.style, bg_color=args.bg_color,
                             state_bg_color=args.state_bg_color,
                             state_fg_color=args.state_fg_color,
@@ -331,7 +365,9 @@ class SnippetCastMagics(Magics):
                       style=args.style, bg_color=args.bg_color,
                       state_bg_color=args.state_bg_color,
                       state_fg_color=args.state_fg_color,
-                      highlight_color=args.highlight_color)
+                      highlight_color=args.highlight_color,
+                      allow_unnarrated=pause_explicit,
+                      font_size=args.font_size, screenflow=args.screenflow)
             except SystemExit as e:
                 print(f"snippet-cast: {e.code}", file=sys.stderr)
                 return
