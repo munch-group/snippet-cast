@@ -234,7 +234,11 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a>    state_bg_color<span class="op">=</span><span class="va">None</span>,</span>
 <span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a>    state_fg_color<span class="op">=</span><span class="va">None</span>,</span>
 <span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a>    highlight_color<span class="op">=</span>_USE_DEFAULT,</span>
-<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a>    allow_unnarrated<span class="op">=</span><span class="va">False</span>,</span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>    font_size<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a>    screenflow<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a>    quiet<span class="op">=</span><span class="va">False</span>,</span>
+<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <p>Render an annotated Python snippet into a narrated screencast video.</p>
 <p>Parses <code>source_path</code> for trailing <code>#:</code> narration comments, optionally executes it to capture a per-line variable state, and assembles one still-frame-plus-narration clip per beat into <code>out_path</code> with ffmpeg.</p>
 <section id="parameters" class="level2 doc-section doc-section-parameters">
@@ -274,7 +278,23 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </dd>
 <dt><code><span class="parameter-name"><strong>pause</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">PAUSE_DEFAULT</span></code></dt>
 <dd>
-<p>Seconds of silence to hold on each beat’s frame after its narration finishes, before the next beat begins [default: <code>PAUSE_DEFAULT</code>]. <code>0</code> cuts directly from one beat’s narration to the next. In two-pass mode it applies within both passes and at the seam between them (the writing pass holds its finished code for <code>pause</code> seconds before the walkthrough starts). Never appended after the video’s final beat.</p>
+<p>Seconds of silence to hold on each beat’s frame after its narration finishes, before the next beat begins [default: <code>PAUSE_DEFAULT</code>]. <code>0</code> cuts directly from one beat’s narration to the next. In two-pass mode it applies within both passes and at the seam between them (the writing pass holds its finished code for <code>pause</code> seconds before the walkthrough starts). Never appended after the video’s final beat. With <code>allow_unnarrated=True</code> on a snippet that has no narration at all, it is instead the full length of every beat.</p>
+</dd>
+<dt><code><span class="parameter-name"><strong>allow_unnarrated</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">False</span></code></dt>
+<dd>
+<p>Render a snippet with no <code>#:</code> comments at all instead of exiting with “No narration found”: one beat per code line, progressively revealed, each held for <code>pause</code> seconds with no audio synthesized (no TTS backend is used, whatever <code>tts</code> says). Intended for producing a silent, evenly paced screencast to narrate afterwards in a video editor. Requires <code>pause</code> &gt; 0, since it is the whole length of each beat. The CLI turns this on exactly when <code>--pause</code> is given explicitly (or via <code>SNIPPET_CAST_PAUSE</code>), so a forgotten <code>#:</code> still reports the error rather than silently rendering.</p>
+</dd>
+<dt><code><span class="parameter-name"><strong>font_size</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">None</span></code></dt>
+<dd>
+<p>Code font size in pixels for this render [default: <code>FONT_SIZE</code>]. The state panel and the captions scale with it, each keeping the offset it has from <code>FONT_SIZE</code> in the module constants — so a <code>PANEL_FONT_SIZE</code> edited to differ stays that much apart. <code>None</code> means “use <code>FONT_SIZE</code>”, which renders exactly as it did before this option existed. Values below <code>FONT_SIZE_MIN</code> are clamped (the CLI rejects them outright). Changing it resizes the whole canvas, which is fine — <code>plan_canvas()</code> measures the frame at this size — but it must be decided once per video, never per frame (invariant 1).</p>
+</dd>
+<dt><code><span class="parameter-name"><strong>screenflow</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">None</span></code></dt>
+<dd>
+<p>Target frame as a <code>(width, height)</code> pair (see <code>resolve_screenflow_arg()</code>), or None for a canvas sized to the snippet. The content block keeps its natural size and is CENTRED in that frame — nothing is scaled, so text stays crisp and the caption band stays under the code rather than pinned to the frame’s bottom edge. A snippet whose natural canvas is larger than the frame raises <code>ValueError</code> (the CLI turns that into an exit naming a <code>font_size</code> that would fit) rather than being silently shrunk.</p>
+</dd>
+<dt><code><span class="parameter-name"><strong>quiet</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">False</span></code></dt>
+<dd>
+<p>Suppress every progress line, note and trace warning — and whatever the snippet itself prints while being traced. Errors are NOT suppressed: they still raise/<code>sys.exit</code> to stderr, so a quiet run that fails can’t be mistaken for one that succeeded.</p>
 </dd>
 <dt><code><span class="parameter-name"><strong>manual_audio_dir</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">None</span></code></dt>
 <dd>
@@ -286,7 +306,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </dd>
 <dt><code><span class="parameter-name"><strong>highlight_color</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">_USE_DEFAULT</span></code></dt>
 <dd>
-<p><code>"#rrggbb"</code> band behind the highlighted code line, overriding the style’s own <code>highlight_color</code>. <code>None</code> uses the style’s; omit the argument to use the <code>HIGHLIGHT_COLOR</code> global. Worth setting for a style that declares none — pygments’ unset default is a pale <code>#ffffcc</code> (<code>DarkModernStyle</code>/<code>LightModernStyle</code> are both in that boat); a style loaded from a <code>.theme</code> file gets one derived instead.</p>
+<p><code>"#rrggbb"</code> band behind the highlighted code line, overriding the style’s own <code>highlight_color</code>. <code>HIGHLIGHT_PANEL</code> (<code>"panel"</code>, the shipped <code>HIGHLIGHT_COLOR</code> default) tracks the STATE panel background, including a per-run <code>state_bg_color</code>, so the band and the box read as one surface. <code>None</code> uses the style’s; omit the argument to use the <code>HIGHLIGHT_COLOR</code> global. Worth setting for a style that declares none — pygments’ unset default is a pale <code>#ffffcc</code> (<code>DarkModernStyle</code>/<code>LightModernStyle</code> are both in that boat); a style loaded from a <code>.theme</code> file gets one derived instead.</p>
 </dd>
 <dt><code><span class="parameter-name"><strong>state_bg_color</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">None</span></code></dt>
 <dd>
