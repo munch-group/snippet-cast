@@ -119,6 +119,52 @@ Key data structures:
   the highlight follows execution (progressive reveal is intentionally disabled
   here — a bottom driver call would otherwise make the reveal jump around).
 
+#### Narration separators: `//` between passes, `/` between visits
+
+Two levels, and the order they are applied in matters:
+
+```
+first-pass  //  second-pass entry  /  second-pass completion
+```
+
+- `TWO_PASS_SEP` is **`//`** — `split_narration()` splits on the first one.
+- `ENTRY_SEP` is **`/`** — `split_entry()` splits ONE pass's text into
+  `(entry, completion)`, the two visits `--order exec` makes to a line.
+
+Allowed shapes: `narration`, `entry / completion`, `pass1 // pass2`, and
+`pass1 // entry / completion`. Every mode narrates the COMPLETION half;
+only `--order exec` has an entry visit to show the other one on.
+
+`split_entry()` runs AFTER `split_narration()` and after `order_markers()`
+has stripped any `N) ` prefix, so `2) a // b / c` numbers the pass, not one
+half of it.
+
+**This was a breaking change** — the pass separator used to be a single `/`,
+so an older file's `write / explain` now parses as entry/completion and
+quietly loses its writing pass. There is no way to detect that from the text
+alone, so `_warn_unused_entry_narration()` names every line carrying an entry
+narration the chosen order cannot show, and points at `//`. `test/data/*.py`,
+the test fixtures and `tmp.py` were migrated; note `footnote.py`'s separators
+sit on wrapped `#` continuation lines, which a `#:`-anchored migration regex
+does not see.
+
+Two consequences inside `_exec_beats()`:
+- A `"call"` visit counts as an arrival and takes the ENTRY text — it is the
+  moment Python steps into the function. A `def` line is arrived at twice
+  (defining it, then entering it), so its entry words play once, at the call;
+  the definition keeps only its completion words.
+- The enter/done collapse is **skipped when the line gives its entry its own
+  words**: the two frames match but the narration does not, so collapsing
+  would silently drop it.
+
+`_footnote_comment()` merges per pass AND, within the walkthrough, per half,
+so an entry narration in the reference and a completion narration in the body
+each land where they belong.
+
+Hazard unchanged in kind but not in likelihood: a literal `/` in prose
+("and/or", "input/output") now splits entry from completion. It used to split
+the passes.
+
 #### Two-pass narration (orthogonal to the above, first-exec only)
 
 `split_narration(text)` splits a `#:` narration on the first `/` into
@@ -159,6 +205,72 @@ i.e. the fully-typed code, so the walkthrough doesn't start talking the
 instant the writing pass stops). That in-loop guard is what keeps the seam
 gap the only clip in that seam — and what keeps a pause from ever landing
 after the video's final beat.
+
+#### Execution order (`--order exec`, first-exec only)
+
+`--order {source,exec}` (`SNIPPET_CAST_ORDER`, `build(order=...)`) is the
+third answer to "what order do the beats play in", alongside source order and
+`N)` numbering. `ORDER_EXEC` hands beat construction to `_exec_beats()`
+instead of `build_beats()`'s usual loop.
+
+Each marked line contributes one beat per KIND of visit, in time order:
+`"enter"` (about to run — its pre-state), `"call"` (a function being entered,
+on its `def` line, showing the parameters as just bound) and `"done"` (it has
+finished — its post-state). So `result = fib(7)` is highlighted on entry with
+no `result` yet, the whole body plays, and it is highlighted again at the end
+showing `result = 13`. `fib.py` goes from 7 beats to 12.
+
+**Only `"done"` carries the narration** — a line's `#:` describes what it DID,
+which is not true yet on the way in. Entry/call beats are silent, so
+`_render_from_beats()` holds them for `PART2_EMPTY_HOLD` rather than
+synthesizing `""`: an empty synth is a near-zero-length clip, and under
+`--tts manual` it would consume a numbered recording and desync every later
+beat from `--export-script`'s numbering (the same rule `_narration_sequence()`
+already applies). An `"enter"` whose own `"done"` follows immediately with an
+identical state is dropped as a pure duplicate — that is every instantaneous
+line, such as a module-level `def`.
+
+**Every beat carries `revealed=None`** — the whole snippet is on screen from
+the first frame and only the highlight moves, exactly as in `--every` mode and
+for the same reason: playback jumps around (call site, then the body, then
+back to the call site), so revealing lines in that order would make code
+appear in a scattered, hole-punched sequence instead of reading as a program.
+It also removes any need to special-case never-executed lines, which are on
+screen like every other. (Two-pass mode already did this for pass 2 —
+`_render_two_pass()` ignores `revealed` there because pass 1 has already
+typed the code in.) Typing is skipped as a consequence, since
+`_render_from_beats()` only types when `revealed is not None`.
+
+Ordering rules that are easy to get wrong:
+- A marker whose line NEVER runs contributes no beat, so its narration is
+  dropped — but its code is on screen throughout like everything else.
+- A comment-only marker is slotted after the `"done"` of the nearest
+  preceding code line **that actually got a beat** — not merely the nearest
+  preceding marked line, or a comment under a never-called function would be
+  dropped along with it. Nothing preceding it means first, which is where an
+  intro line naturally sits.
+- Dropped narration is **reported**, listing the lines. Losing half a
+  snippet's commentary reads as a bug in the tool rather than as an untaken
+  branch or — far more often — a snippet that raised part-way and never
+  reached the rest. `trace_run()` does report the exception, but a few lines
+  earlier and easy to miss in a notebook.
+
+A line unwound by an exception still gets a `"done"` beat: the `return` event
+fires as the frame unwinds, so `close()` records its state at the moment it
+blew up. That is informative, but note it means such a line IS narrated even
+though it never completed normally.
+
+`trace_run(entries=True)` is what records the `"enter"` steps, and it is
+**off by default**: it doubles both the `_snapshot()` calls and the length of
+`steps`, and nothing else needs them. `Step.kind` replaced the old
+`call_entry` bool; `build_beats()` filters to `kind == "done"` for
+`env_before()` and `--every`, exactly as it filtered out `call_entry` before.
+
+Refused combinations, all `sys.exit`: `--no-trace` (there is no order without
+running), `--every` (already one beat per execution), and `N)` prefixes in the
+affected pass (two different answers to the same question). In two-pass mode
+it applies to the WALKTHROUGH only — pass 1 is someone writing the code, which
+happens top-to-bottom.
 
 #### Custom narration order (first-exec only, orthogonal to two-pass)
 
@@ -919,6 +1031,15 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   because `_is_light()` parses it by slicing those exact six hex digits.
   `plan_canvas()` picks readable caption/rule colors for whichever background
   actually wins via `_is_light()` (luminance) — see invariant 13.
+  **Quoting differs between the front ends**, so `_hex_color_arg()` and
+  `resolve_screenflow_arg()` both run values through `_unquote()`. On the CLI
+  a bare `#rrggbb` would be eaten as a shell comment, so the docs show
+  `--bg-color '#1F1F1F'` and the shell removes the quotes; in a
+  `%%snippet-cast` line there is no shell, and IPython's `parse_argstring`
+  hands the value over with the quotes attached — so the exact spelling the
+  docs teach was rejected as not-a-hex-color. Stripping one matched pair
+  makes both spellings work in both places (a no-op on the CLI).
+
   `bg_color` overrides whatever background the style itself declares without
   touching its syntax colors; it does NOT adapt them, so pairing a dark
   background with a light style is on the caller. Note the three-state
@@ -932,10 +1053,18 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   validated by `resolve_panel_args()` and resolved once into a `PanelColors`
   carried on `Canvas.panel` — same "resolve once, every frame draws from it"
   rule as `Canvas.style`. `--state-fg-color` is deliberately ONE knob for all
-  the panel's text: it sets names and values alike and blends the header
-  `HEADER_DIM` toward the background so the label stays subordinate; the
-  default navy-names/black-values split needs `COL_NAME`/`COL_VALUE`
-  edited instead. Those constants (`PANEL_BG`, `COL_HEADER`, `COL_NAME`,
+  the panel's text: it sets names and values alike; the default
+  navy-names/black-values split needs `COL_NAME`/`COL_VALUE` edited instead.
+
+  The panel is **just the box and its rows** — no "STATE" title, and no
+  `"(no state)"` placeholder for a line that never executed (a function
+  defined but never called now shows an empty box). Both were removed as
+  noise, and each took dead code with it: dropping the title freed a row in
+  `plan_canvas()`'s `panel_h` (so a state-heavy snippet renders a shorter
+  frame) and left `FontSizes.panel_header` with nothing to size; dropping the
+  placeholder left `PanelColors.header`, `COL_HEADER` and `HEADER_DIM` with
+  no reader at all. All four are gone — if you reintroduce either label, they
+  come back with it. Those constants (`PANEL_BG`, `COL_HEADER`, `COL_NAME`,
   `COL_VALUE`) remain the fallbacks, and are independent of STYLE and
   `BG_COLOR` — which means **they do not follow a `--style` change**, so a
   dark style needs its own `--state-*-color` pair (that asymmetry is
@@ -943,7 +1072,17 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   `PANEL_BG` must stay a visible step away from the active page background or
   the STATE box blends into it and disappears — a real bug twice over now
   (`#1e1f1c` against `#1F1F1F`, then `#181818` against the light default;
-  now `#E8E9EA` against `#F3F4F5`).
+  now `#DDDEDF` against `#F3F4F5`). Since `--highlight-color` defaults to
+  `HIGHLIGHT_PANEL`, that one constant sets BOTH the box and the band behind
+  the current line.
+
+  Two-pass mode's writing pass hides the box entirely
+  (`compose(show_panel=False)`), since it runs with `steps=[]` and so has an
+  empty box on every frame. Hidden, not removed: one canvas size serves the
+  whole video (invariant 1), so the space stays reserved and the frames still
+  concat. Every pass-1 frame builder passes it — the typed reveal
+  (`make_pass1_code_clip` -> `typing_frames`), the narrated hold, the
+  `--pause` hold, and the seam frame held between the passes.
   `LINE_PAD` is the px of vertical breathing room in each code row, and
   `HL_PAD` (defined as `LINE_PAD`) is how far the highlight band extends past
   its line's text on the left and right — kept equal so the band has the same
@@ -1038,6 +1177,160 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   leaves `input` empty. `resolve_screenflow_arg()` detects that shape and says
   so; `main()` resolves it BEFORE its missing-input check specifically so that
   hint wins over argparse's generic "required: input".
+- **Video controls (cell magic ONLY), always restyled:** Chrome/Safari draw
+  the native control bar on a tall black gradient scrim that covers roughly
+  the bottom TWO-THIRDS of the frame and hides the code, so `_controls_css()`
+  strips it unconditionally — there is no flag to bring it back. What IS
+  selectable is the glyph colour, because the UA draws the glyphs WHITE:
+  against a light frame they vanish once the scrim is gone, so
+  `filter:invert(1)` flips them dark; against a dark frame they are already
+  legible and inverting is what hides them (measured in headless Chrome on a
+  monokai render: peak luminance 31 inverted vs 255 left alone).
+
+  **`--light-controls` (`SNIPPET_CAST_LIGHT_CONTROLS`) is TRI-STATE.** Unset,
+  `_light_controls_for()` picks from the frame's own resolved background via
+  `_is_light()` — the same luminance test `plan_canvas()` uses for caption
+  colors — so the shipped light theme and `--style monokai` both come out
+  right with no flag at all; `--light-controls`/`--no-light-controls` force
+  it. Because `None` is a MEANINGFUL value here it cannot go through
+  `resolve_env_defaults()`, whose whole contract is "fill anything still
+  None", so its env var is read explicitly in the magic body. The
+  auto-detection is wrapped in a try/except: a bad `--style` is reported by
+  `resolve_style_args()`, and picking a glyph colour must not raise a second,
+  confusing error on top of it.
+
+  This needs a real `<style>` block — an inline `style` attribute cannot
+  target a `::-webkit-media-controls-*` pseudo-element — so `_video()` now
+  ALWAYS returns `HTML` rather than `Video`; `display()` takes either, but a
+  test asserting "the last displayed HTML is the live-record status" had to
+  become an `any(...)` because the video itself is now an HTML too. The two
+  variants use DISTINCT class names (`CONTROLS_CLASSES`), which is
+  load-bearing rather than cosmetic: a Quarto page can hold a light cell and
+  a dark one, and two `<style>` blocks targeting the same class would leave
+  the later rule governing BOTH videos. Scoping to a class also keeps it from
+  restyling every other video on the page. Firefox ignores `-webkit-`
+  pseudo-elements and keeps its own controls, which already have a legible
+  flat backdrop. Verified end-to-end through `quarto render` plus a
+  headless-Chrome screenshot of a mixed light/dark page.
+
+  Note `invert(1)` is a true inversion, not "paint the glyphs black" — right
+  only because the UA glyphs are white today.
+- **`--help` in a cell (cell magic ONLY):** `%%snippet-cast --help` prints
+  every option with its default and env var, then stops without rendering —
+  **including from a cell with nothing under it**, which takes two pieces.
+  IPython refuses a `%%` cell whose body is empty (`cell == ''` in
+  `InteractiveShell.run_cell_magic`) and raises BEFORE any magic function is
+  reached, so it cannot be handled inside the magic at all. So the magic is
+  registered with `@line_cell_magic` (making `%snippet-cast --help` work, and
+  making IPython's own refusal end "Did you mean the line magic
+  %snippet-cast (single %)?"), and `_bodiless_cell_to_line_magic`, an input
+  transformer on `input_transformers_cleanup`, rewrites a bodiless
+  `%%snippet-cast ...` to `%snippet-cast ...` before that check runs. The
+  transformer sees EVERY cell in the notebook, so it is deliberately narrow —
+  first line opening with `%%snippet-cast` and nothing but blank lines under
+  it — and its registration is guarded against `%load_ext` being called twice.
+  Invoked as a line magic with anything other than `--help`, the magic says
+  to use the cell form: there is no snippet to render.
+  It needs an EXPLICIT `@argument("-h", "--help", ...)`: `magic_arguments`
+  builds its parser with `add_help=False`, so otherwise `--help` is just an
+  unrecognized argument and the cell fails with a `UsageError`. Handled
+  immediately after `parse_argstring()` — before `resolve_env_defaults()` and
+  every validation — so it answers whatever else the line or the cell body
+  says. `_help_text()` strips `MagicArgumentParser.format_help()`'s
+  docstring styling: a leading `::` reST literal-block marker, and the prog
+  name `%snippet_cast`, which is neither the cell-magic spelling nor
+  hyphenated.
+- **Quarto cell directives (cell magic ONLY):** `_strip_directives()` removes
+  whole `#|` lines from the cell before anything else sees it. They configure
+  Quarto (`#| fig-column: margin`), not the snippet, so they must not be typed
+  out, narrated or highlighted. Found through `_scan_comments()`/`tokenize`
+  rather than line matching, for the same reason `parse()` does (critical
+  invariant 5): a `#|` inside a string literal is not a comment. Only a
+  comment that IS the whole line counts, so a trailing `x = 1  #| ...` is left
+  alone. Whole lines are dropped rather than blanked — everything downstream
+  re-derives its line numbers from the rewritten text (the `resolve_footnotes()`
+  trick), and a blank row would take up height in every frame (invariant 12).
+- **Where a cell's video goes (cell magic ONLY):** with no `-o`/`-n`/`-d` (or
+  their env vars), `_cell_output_path()` writes to
+  `CACHE_DIR/<12-hex hash of the cell>.mp4` — `.snippet-cast/`, beside the
+  notebook. Two problems, one fix. Every cell used to default to `out.mp4`,
+  so in a notebook of N defaulted cells the first N-1 videos were silently
+  OVERWRITTEN by the last (`docs/pages/example.ipynb` had 6 cells writing
+  `out.mp4`, 3 writing `hello.mp4`, 2 writing `fibster.mp4`); and a student
+  running the notebook got those files strewn through their own folder.
+
+  Hashed, not random, and the difference matters: a random name would mint a
+  new file on EVERY execution, so an afternoon of tweaking narration would
+  leave the directory full of orphans. Hashing the cell's own text (magic
+  line AND body) makes a re-run of an unchanged cell reuse its file. Editing
+  a cell does strand the old one — the directory is hidden and writes a
+  `.gitignore` containing `*` on creation, and nothing can safely tell which
+  files another notebook in the same folder still references.
+
+  The path stays RELATIVE on purpose. An absolute one (a system tempdir, the
+  obvious first idea) is not servable by a notebook front end and is not
+  copied by Quarto, so the video renders as the browser's 300x150 black
+  fallback box. Quarto's resource globbing was verified to reach into a dot
+  directory, so `resources: - "**/*.mp4"` picks these up — see the note on
+  `docs/_quarto.yml` below.
+- **Fit the video to its container (cell magic ONLY):** `--responsive`
+  (`SNIPPET_CAST_RESPONSIVE`), **on by default** — `max-width` never scales a
+  small video UP, so capping it is only ever an improvement;
+  `--no-responsive` keeps the intrinsic size. The frame is sized to the snippet
+  (`plan_canvas()`), so one wide line of code makes a wide video — 2080px for
+  an 80-char line — and neither Quarto nor Bootstrap caps `<video>` width, so
+  it overflows the content column. `_video()` in `magic.py` passes
+  `RESPONSIVE_STYLE` (`max-width:100%;height:auto`) through
+  `IPython.display.Video`'s own `html_attributes`, which styles the `<video>`
+  ELEMENT — a styled wrapper div would itself be capped while the video inside
+  kept overflowing it. `html_attributes` replaces the default wholesale, hence
+  re-stating `controls`. Nothing is emitted unless asked for: the
+  non-responsive call is byte-for-byte the pre-existing one (pinned by a
+  test), and both the plain-src and embed/base64 paths keep working since
+  Video builds the src either way. Verified through a real `quarto render`.
+
+  **This is deliberately magic-only** — the one place the "a new option needs
+  a matching `@argument` in BOTH `main()` and `magic.py`" rule does not apply.
+  It is purely about how a front end lays the result out; `snippet-cast`
+  writes a file and displays nothing, so there is no CLI equivalent to add.
+- **Videos in the Quarto docs:** `docs/_quarto.yml` needs
+  `project: resources: - "**/*.mp4"`. `%%snippet-cast` writes its `.mp4` as a
+  side effect of executing the cell and displays it through a relative
+  `<video src>`; Quarto does not discover a resource that way, so without the
+  glob the videos are simply absent from `_build` and every one renders as a
+  300x150 black box (this was a live bug). `--embed` is the alternative —
+  self-contained pages, immune to both resource copying and `freeze`, at
+  roughly +35% page size per video.
+- **Silence the terminal:** `-q`/`--quiet` (`SNIPPET_CAST_QUIET`,
+  `build(quiet=...)`, `export_script(quiet=...)`). Every informational print
+  goes through `_say()`, a one-line wrapper over `print()` gated on the
+  module-level `_QUIET`; `_quieted(bool)` is the context manager that sets it
+  (restoring the previous value, and nesting can only ever TIGHTEN — an inner
+  `quiet=False` cannot un-quiet an outer `quiet=True`).
+
+  A module flag rather than a threaded parameter because this is
+  cross-cutting: `trace_run()`, `resolve_footnotes()`, `_build_all_beats()`,
+  `_render_from_beats()` and `_render_two_pass()` would all need it, and
+  several already carry very long signatures. `build()` is a thin
+  `_quieted()` wrapper around `_build()` purely so the body needn't be
+  re-indented; `main()` sets `_QUIET` once directly, since a CLI run is a
+  whole process and the argument-validation notes fire before `build()` is
+  even called.
+
+  Three deliberate exclusions:
+  - **Errors are never silenced.** They go out via `sys.exit`/stderr, which
+    `_say()` doesn't touch, so a quiet run that fails still says why.
+  - **`--export-script` and `--style list` still print.** Those lines are the
+    command's RESULT, not chatter — `-q` just strips the trace warnings
+    around them, which is what makes `--export-script -q > script.txt` clean.
+  - **`--record` rejects `--quiet`** outright: recording is an interactive
+    session whose prompts ARE its output.
+
+  `_quiet_stdout()` additionally redirects the traced snippet's own `print()`
+  output (`trace_run()` executes user code) — a no-op when not quiet.
+- **Play beats in execution order:** `--order exec` (`SNIPPET_CAST_ORDER`,
+  `build(order=...)`) — `_exec_beats()`; see the section above for the
+  entry/call/done visit model and its rules.
 - **Change the narration marker:** `MARKER` (keep it a valid `#` comment prefix).
 - **Adjust typing speed:** default is `TYPE_SPEED` (seconds/char, currently
   `0.1`), overridable per-run with `--typing-speed`. There is only ONE

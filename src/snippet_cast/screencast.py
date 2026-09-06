@@ -19,8 +19,8 @@ are left alone and never narrated.
 By default the snippet is EXECUTED once under sys.settrace, and each beat shows
 a Python Tutor-style "state" panel with the variables as they are right after
 that line first runs (for a loop body, after the first iteration). Lines that
-never execute — e.g. a function that is defined but never called — show
-"(no state)", so include a driver call if you want the body's state to appear.
+never execute — e.g. a function that is defined but never called — show an
+empty panel, so include a driver call if you want the body's state to appear.
 Pass --no-trace to skip execution entirely (code + highlight only).
 
 NARRATION INTERPOLATION: a narration may reference live variables with {name},
@@ -123,6 +123,21 @@ JUPYTER: `pip install snippet-cast[jupyter]`, then in a notebook:
         return a            #: Return a — the nth Fibonacci number.
     result = fib(7)         #: Call fib with seven; result becomes {result}.
 
+The displayed video's control bar is always restyled to drop the black
+gradient the browser draws behind it, which would otherwise cover most of the
+frame; the glyphs are flipped dark for a light frame and left white for a dark
+one, chosen automatically from the theme. `--light-controls` /
+`--no-light-controls` force it either way.
+
+`%%snippet-cast --help` prints every option with its default and environment
+variable, and renders nothing — from an empty cell too. `%snippet-cast --help`
+(single `%`) does the same.
+
+`--responsive` is magic-only and ON by default: it caps the displayed video at
+the width of whatever it is rendered into (a Quarto column, a narrow notebook
+pane) rather than the exact pixel size the snippet produced. `--no-responsive`
+keeps the intrinsic size.
+
 Same flags as the CLI (`--tts`, `--every`, `--subtitles`, `--typing`,
 `--typing-speed`, `--pause`, `--no-trace`, `--export-script`, `--tts manual
 --manual-audio-dir DIR`); `--tts` defaults to `silent` here instead of `say`,
@@ -133,9 +148,11 @@ USAGE (installed console script):
     snippet-cast input.py -o out.mp4 --tts say
     snippet-cast input.py -o out.mp4 --tts silent   # no audio backend needed
     snippet-cast loop.py  -o out.mp4 --every         # animate each iteration
+    snippet-cast input.py -o out.mp4 --order exec    # follow Python's own order
     snippet-cast input.py -o out.mp4 --subtitles     # burn narration captions
     snippet-cast input.py -o out.mp4 --typing        # type each new line in
     snippet-cast input.py -o out.mp4 --typing --typing-speed 0.06  # slower typing
+    snippet-cast input.py -o out.mp4 -q             # silent: no progress output
     snippet-cast input.py -o out.mp4 --pause 0.6     # breathing gap between beats
     snippet-cast plain.py -o out.mp4 --pause 2.0     # NO '#:' at all: one silent
                                                      # 2s frame per code line, to
@@ -176,6 +193,7 @@ TTS backends (choose with --tts):
 
 import argparse
 import ast
+import contextlib
 import functools
 import io
 import json
@@ -239,8 +257,8 @@ HIGHLIGHT_COLOR = HIGHLIGHT_PANEL  # band behind the highlighted code line, over
                         # / build(highlight_color=).
 FONT_NAME = "DejaVu Sans Mono"
 FONT_SIZE = 26
-PANEL_FONT_SIZE = FONT_SIZE  # state-panel name/value text — mirrors the code font
-                             # size by default; header is PANEL_FONT_SIZE - 8
+PANEL_FONT_SIZE = FONT_SIZE  # state-panel name/value text — mirrors the code
+                             # font size by default
 FONT_SIZE_MIN = 6            # floor for --font-size; pygments/PIL need a real size
 SCREENFLOW_SIZE = "1920x1080"  # --screenflow's target canvas when given no WxH of its own
 FPS = 30
@@ -252,14 +270,10 @@ HL_PAD = LINE_PAD       # px the highlight band extends past its line's text,
 PAD = 40                # px padding around the code on the canvas
 GAP = 72                # px between the code column and the state panel
 PANEL_PAD = 22          # inner padding of the state panel
-PANEL_BG = "#E8E9EA"    # state-panel background — must stay a visible step off
+PANEL_BG = "#DDDEDF"    # state-panel background — must stay a visible step off
                         # BG_COLOR/STYLE's background or the box disappears
-COL_HEADER = "#6D6D6D"  # muted grey for the panel header / "(no state)"
 COL_NAME = "#000080"    # variable names
 COL_VALUE = "#000000"   # variable values
-HEADER_DIM = 0.45       # how far --state-fg-color is blended toward the panel
-                        # background for the "STATE" header / "(no state)", so
-                        # the label stays subordinate to the values it labels
 MAXVAL = 42             # truncate a value's repr to this many chars
 CAP_PAD = 24            # inner padding of the caption band
 CAP_GAP = 10            # px between wrapped caption lines
@@ -281,7 +295,11 @@ TYPE_MAXFRAMES = 450    # absolute cap on typing frames per beat, so a slow spee
                         # Chosen to cover a 150-char line at TYPE_SPEED; the
                         # guard still bites on a deliberately slow
                         # --typing-speed (e.g. 2s/char clamps to 15s a beat)
-TWO_PASS_SEP = "/"      # splits a #: narration into "writing pass / walkthrough pass"
+TWO_PASS_SEP = "//"     # splits a #: narration into "writing pass // walkthrough pass"
+ENTRY_SEP = "/"         # splits ONE pass's narration into "entry / completion",
+                        # the two visits --order exec makes to a line. A single
+                        # "/" therefore no longer means two-pass — see
+                        # split_narration()/split_entry().
 PART2_EMPTY_HOLD = 0.8  # seconds to hold a walkthrough-pass beat with no narration
 PAUSE_DEFAULT = 0.8     # default seconds of silence held on each beat after its narration
 MANUAL_AUDIO_DIR_DEFAULT = "./manual_audio"  # default --manual-audio-dir for CLI/notebook
@@ -296,6 +314,49 @@ SAY_EMPHASIS_RE = re.compile(r"(?<![A-Za-z])[A-Z]{2,}(?:\s+[A-Z]{2,})*(?![a-z])"
 AUDIO_AR = "44100"      # normalise all clips so concat -c copy is safe
 AUDIO_AC = "2"
 MANUAL_AUDIO_EXTS = (".wav", ".mp3", ".m4a", ".aiff", ".flac", ".ogg")  # --tts manual / --record
+
+# ---------------------------------------------------------------------------
+# Progress output. Everything informational the tool prints goes through
+# _say() so -q/--quiet can silence it in one place. Errors deliberately do
+# NOT: they go out via sys.exit()/stderr, which --quiet leaves alone, so a
+# quiet run that fails still says why instead of looking like a success.
+# ---------------------------------------------------------------------------
+_QUIET = False
+
+
+def _say(*args, **kwargs):
+    """print() for progress, notes and warnings — silenced under --quiet."""
+    if not _QUIET:
+        print(*args, **kwargs)
+
+
+@contextlib.contextmanager
+def _quieted(quiet):
+    """Run a block with _say() silenced when `quiet`. A module-level flag
+    rather than a threaded parameter because this is cross-cutting: it would
+    otherwise have to be added to trace_run(), resolve_footnotes(),
+    _build_all_beats(), _render_from_beats() and _render_two_pass() alike,
+    several of which already carry very long signatures. Restores the previous
+    value, and nesting can only ever tighten it (an inner quiet=False cannot
+    un-quiet an outer quiet=True)."""
+    global _QUIET
+    prev = _QUIET
+    _QUIET = quiet or prev
+    try:
+        yield
+    finally:
+        _QUIET = prev
+
+
+def _quiet_stdout():
+    """Swallow whatever the traced snippet itself prints, under --quiet only.
+    trace_run() executes the user's code, so a snippet with print() in it
+    writes straight to the terminal — chatter that --quiet is expected to
+    cover too. A no-op context manager when not quiet, so the snippet's output
+    reaches the terminal exactly as before."""
+    return contextlib.redirect_stdout(io.StringIO()) if _QUIET \
+        else contextlib.nullcontext()
+
 
 # Monospace font files to try for the PIL-drawn state panel (first hit wins).
 _FONT_CANDIDATES = [
@@ -509,14 +570,21 @@ class Step:
     disp: dict          # {name: repr-string, truncated}  -> panel
     text: dict          # {name: str(value)}              -> interpolation
     frame_id: int       # id() of the frame, to find the next step in same scope
-    call_entry: bool = False   # synthesized at a 'call' event rather than a
-                               # line completion: the parameters as just bound,
-                               # attached to the `def` line. Consumed ONLY by
-                               # first-exec's `first` map (see build_beats) —
-                               # these locals belong to the CALLEE's frame, so
-                               # letting them into env_before() would report
-                               # them as the caller's scope, and letting them
-                               # into --every would add a beat per call.
+    kind: str = "done"  # which visit of the line this is:
+                        #   "done"  — the line has finished running; its
+                        #             post-state (invariant 3). The only kind
+                        #             recorded unless entries are asked for,
+                        #             so every existing consumer sees exactly
+                        #             the list it always did.
+                        #   "call"  — a 'call' event: the parameters as just
+                        #             bound, attached to the `def` line.
+                        #   "enter" — the line is about to run; its PRE-state.
+                        #             Recorded only when trace_run(entries=True)
+                        #             (--order exec), since it doubles both the
+                        #             snapshot cost and the list length.
+                        # "call"/"enter" locals belong to a frame the line does
+                        # not sit in the middle of, so env_before() and --every
+                        # both filter down to "done" (see build_beats).
 
 
 def _fmt_value(v):
@@ -552,12 +620,19 @@ def _snapshot(frame):
     return disp, text
 
 
-def trace_run(source, filename):
-    """Return an ordered list of Step, one per line execution (completion order)."""
+def trace_run(source, filename, entries=False):
+    """Return an ordered list of Step, one per line execution (completion order).
+
+    `entries=True` additionally records a "enter" Step at each line event —
+    the state as the line is ABOUT to run, before its own effect. That is what
+    lets --order exec highlight `y = f(x)` twice: once on entry showing `x`,
+    then again, after the whole call has run, showing `y`. Off by default
+    because it doubles both the number of _snapshot() calls and the length of
+    the list, and nothing else needs it."""
     try:
         code = compile(source, filename, "exec")
     except SyntaxError as e:
-        print(f"  ! cannot trace (syntax error: {e}); panels will be empty.")
+        _say(f"  ! cannot trace (syntax error: {e}); panels will be empty.")
         return []
     steps = []
     pending = {}   # id(frame) -> lineno awaiting its post-state snapshot
@@ -582,9 +657,13 @@ def trace_run(source, filename):
             if not frame.f_code.co_name.startswith("<"):
                 disp, text = _snapshot(frame)
                 steps.append(Step(frame.f_code.co_firstlineno, disp, text,
-                                  id(frame), call_entry=True))
+                                  id(frame), kind="call"))
         elif event == "line":
-            close(frame)
+            close(frame)          # the previous line in this frame just finished
+            if entries:
+                disp, text = _snapshot(frame)
+                steps.append(Step(frame.f_lineno, disp, text, id(frame),
+                                  kind="enter"))
             pending[id(frame)] = frame.f_lineno
         elif event == "return":
             close(frame)
@@ -594,10 +673,11 @@ def trace_run(source, filename):
     glb = {"__name__": "__main__", "__file__": filename}
     sys.settrace(tracer)
     try:
-        exec(code, glb)
+        with _quiet_stdout():      # the snippet's own print()s, under --quiet
+            exec(code, glb)
     except Exception as e:
-        print(f"  ! snippet raised {type(e).__name__}: {e} "
-              f"(state captured up to that point)")
+        _say(f"  ! snippet raised {type(e).__name__}: {e} "
+             f"(state captured up to that point)")
     finally:
         sys.settrace(None)
     return steps
@@ -618,10 +698,29 @@ def split_narration(text):
     """Split a #: narration on the first TWO_PASS_SEP into (part1, part2),
     each stripped — part1 narrates the writing pass, part2 the walkthrough
     pass. No separator present -> ("", text), so a file that never uses it
-    is unaffected (whole text stays in part2, exactly today's behavior)."""
+    is unaffected (whole text stays in part2)."""
     if TWO_PASS_SEP in text:
         part1, _, part2 = text.partition(TWO_PASS_SEP)
         return part1.strip(), part2.strip()
+    return "", text.strip()
+
+
+def split_entry(text):
+    """Split ONE pass's narration on the first ENTRY_SEP into
+    (entry, completion), each stripped.
+
+    --order exec visits a line twice — on the way in, before it has done
+    anything, and again once it has finished — and those want different
+    words: "we call add_one with 2" versus "it returned 3". No separator
+    present -> ("", text): the whole thing narrates the completion, which is
+    the visit that carries the narration in every other mode too.
+
+    Runs AFTER split_narration() and after order_markers() has stripped any
+    `N) ` prefix, so a numbered two-pass line reads `2) a // b / c` and the
+    number still belongs to the pass, not to one half of it."""
+    if ENTRY_SEP in text:
+        entry, _, completion = text.partition(ENTRY_SEP)
+        return entry.strip(), completion.strip()
     return "", text.strip()
 
 
@@ -701,7 +800,8 @@ def order_markers(markers, texts):
 def _footnote_comment(label, head, body):
     """The '#: ...' comment one footnote line is rewritten to: `body` (the
     second occurrence's text) appended to `head` (the first's own text, often
-    empty), joined PER PASS so a '/' on either side keeps its meaning.
+    empty), joined PER PASS — and, within the walkthrough pass, per HALF —
+    so a '//' or a '/' on either side keeps its meaning.
 
     A separator on EITHER side makes this a two-pass narration, and the
     re-emitted line has to keep one even when pass 1 comes out empty — e.g.
@@ -717,7 +817,16 @@ def _footnote_comment(label, head, body):
     h1, h2 = split_narration(head)
     b1, b2 = split_narration(body)
     part1 = " ".join(p for p in (h1, b1) if p)
-    part2 = " ".join(p for p in (h2, b2) if p)
+    # Merge the walkthrough side per HALF as well, so an entry narration in
+    # the reference and a completion narration in the body (or vice versa)
+    # each land where they belong instead of being concatenated into one
+    # string that split_entry() would then cut in the wrong place.
+    he, hc = split_entry(h2)
+    be, bc = split_entry(b2)
+    entry = " ".join(p for p in (he, be) if p)
+    completion = " ".join(p for p in (hc, bc) if p)
+    part2 = (f"{entry} {ENTRY_SEP} {completion}".strip()
+             if (entry or ENTRY_SEP in h2 or ENTRY_SEP in b2) else completion)
     if part1 or TWO_PASS_SEP in head or TWO_PASS_SEP in body:
         head_side = f"{label}) {part1}".rstrip()
         return f"{MARKER} {head_side} {TWO_PASS_SEP} {part2}".rstrip()
@@ -779,9 +888,9 @@ def resolve_footnotes(source: str):
                      f"exactly two: the line it narrates and its body.")
         alone = [o for o in occ if o[3]]
         if not alone:
-            print(f"note: '{label})' is used on two code lines "
-                  f"({occ[0][0]} and {occ[1][0]}) — left alone; a footnote "
-                  f"body has to sit on a line of its own.")
+            _say(f"note: '{label})' is used on two code lines "
+                 f"({occ[0][0]} and {occ[1][0]}) — left alone; a footnote "
+                 f"body has to sit on a line of its own.")
             continue
         # One on its own line supplies the body; if both are, the second does.
         body_occ = alone[-1] if len(alone) == 2 else alone[0]
@@ -840,7 +949,6 @@ class PanelColors:
     """The state panel's four resolved colors. Defaults are the module
     constants, i.e. exactly the look before --state-*-color existed."""
     bg: str = PANEL_BG
-    header: str = COL_HEADER
     name: str = COL_NAME
     value: str = COL_VALUE
 
@@ -857,17 +965,13 @@ def _panel_colors(state_bg=None, state_fg=None):
     (either may be None for "not given").
 
     `state_fg` sets ALL of the panel's text — names and values both — since
-    it is a single knob for "the text in the box"; the header and the
-    "(no state)" placeholder are blended HEADER_DIM toward the background so
-    the label stays quieter than the values, the way the default
-    COL_HEADER/COL_VALUE pair does. Leave it unset to keep the default
-    three-color scheme (green names, off-white values, muted header), or edit
-    COL_NAME/COL_VALUE/COL_HEADER for finer control than one flag gives."""
+    it is a single knob for "the text in the box". Leave it unset to keep the
+    default two-color scheme, or edit COL_NAME/COL_VALUE for finer control
+    than one flag gives."""
     bg = state_bg or PANEL_BG
     if not state_fg:
         return PanelColors(bg=bg)
-    return PanelColors(bg=bg, header=_mix(state_fg, bg, HEADER_DIM),
-                       name=state_fg, value=state_fg)
+    return PanelColors(bg=bg, name=state_fg, value=state_fg)
 
 
 @dataclass
@@ -883,7 +987,6 @@ class FontSizes:
     code: int
     panel: int
     caption: int
-    panel_header: int
 
 
 def _font_sizes(font_size=None):
@@ -900,16 +1003,15 @@ def _font_sizes(font_size=None):
     constants unchanged, so a render that says nothing about fonts is
     identical to before this option existed.
 
-    The readability floors (14 for the caption, 12 for the panel header) are
-    the ones those expressions always carried, now also capped at the size
-    they are subordinate to — otherwise a tiny --font-size would leave the
-    caption LARGER than the code it captions. Identical to the bare floor for
-    every size from 14 up, i.e. everywhere the old constants could reach."""
+    The caption's readability floor (14) is the one that expression always
+    carried, now also capped at the size it is subordinate to — otherwise a
+    tiny --font-size would leave the caption LARGER than the code it captions.
+    Identical to the bare floor for every size from 14 up, i.e. everywhere the
+    old constants could reach."""
     code = FONT_SIZE if font_size is None else max(FONT_SIZE_MIN, int(font_size))
     panel = max(FONT_SIZE_MIN, PANEL_FONT_SIZE + (code - FONT_SIZE))
     return FontSizes(code=code, panel=panel,
-                     caption=min(code, max(14, code - 4)),
-                     panel_header=min(panel, max(12, panel - 8)))
+                     caption=min(code, max(14, code - 4)))
 
 
 def render_panel(vars_dict, width, height, colors=None, fonts=None):
@@ -919,15 +1021,9 @@ def render_panel(vars_dict, width, height, colors=None, fonts=None):
     img = Image.new("RGB", (width, height), colors.bg)
     d = ImageDraw.Draw(img)
     font = _mono_font(fonts.panel)
-    head = _mono_font(fonts.panel_header)
     asc, desc = font.getmetrics()
     lh = asc + desc + 8
     x, y = PANEL_PAD, PANEL_PAD
-    d.text((x, y), "STATE", font=head, fill=colors.header)
-    y += lh
-    if not vars_dict:
-        d.text((x, y), "(no state)", font=font, fill=colors.header)
-        return img
     for name, val in vars_dict.items():
         d.text((x, y), name, font=font, fill=colors.name)
         nw = d.textlength(name + " ", font=font)
@@ -987,7 +1083,155 @@ def _visible_code(code_lines, revealed):
                      for i, line in enumerate(code_lines))
 
 
-def build_beats(code_lines, markers, steps, every, loop_ranges=None):
+def _warn_unused_entry_narration(markers, order):
+    """Say something when a pass carries an `entry / completion` split that
+    the chosen order will never show.
+
+    Only --order exec visits a line twice, so anywhere else the entry half is
+    silently dropped. That matters most as a MIGRATION signal: the pass
+    separator used to be a single '/', so an older file's `write / explain`
+    now parses as entry/completion and loses its writing pass without a word.
+    Naming it turns that from a mystery into a one-character fix."""
+    lines = [m.line_no for m in markers if split_entry(m.text)[0]]
+    if lines and order != ORDER_EXEC:
+        _say(f"note: {len(lines)} line(s) have an entry narration "
+             f"(text before a single {ENTRY_SEP!r}) that only --order exec "
+             f"shows: {', '.join(str(L) for L in lines)}. If you meant a "
+             f"two-pass narration, the separator is {TWO_PASS_SEP!r}.")
+
+
+ORDER_SOURCE = "source"   # --order: markers in source order (or N) order)
+ORDER_EXEC = "exec"       # --order: markers in the order Python visits them
+
+
+def _exec_beats(code_lines, markers, steps):
+    """Beats in the order Python actually VISITS the lines (--order exec).
+
+    Each marked line contributes one beat per kind of visit, in time order:
+    "enter" (about to run — its pre-state), "call" (a function being entered,
+    on its `def` line, showing the parameters as just bound) and "done" (it
+    has finished — its post-state). So `result = fib(7)` is highlighted on
+    entry with no `result` yet, the whole body plays, and it is highlighted
+    again at the end with `result = 13`.
+
+    Only "done" carries the narration: a line's `#:` comment describes what it
+    DID, which is not true yet on the way in. Entry/call beats are therefore
+    silent, and an "enter" immediately followed by its own "done" with the
+    same state is dropped as a pure duplicate — that is every line whose
+    execution is instantaneous, such as a module-level `def`. A line that
+    gives its entry its own words (`entry / completion`) is never collapsed:
+    the frames match but the narration does not.
+
+    A marker whose line never runs contributes NO beat (its narration is
+    dropped), but its code is still revealed, with the final beat, so the
+    snippet never ends up with permanent holes in it.
+
+    Comment-only markers have nothing to execute, so each is slotted directly
+    after the "done" beat of the nearest preceding marked code line — or first,
+    if nothing precedes it, which is where an intro line naturally sits.
+
+    Every beat carries `revealed=None` — the WHOLE snippet is on screen from
+    the first frame and only the highlight moves, exactly as in --every mode
+    and for the same reason: playback jumps around (call site, then the body,
+    then back to the call site), so revealing lines in that order would make
+    code appear in a scattered, hole-punched sequence rather than reading as
+    a program. It also means a line that never runs is on screen like any
+    other, so no special handling is needed to avoid leaving holes."""
+    code_marks = {m.line_no: m for m in markers if m.has_code}
+    comment_marks = [m for m in markers if not m.has_code]
+
+    # First visit of each (line, kind), in time order.
+    visits, seen = [], set()
+    for st in steps:
+        if st.line_no in code_marks and (st.line_no, st.kind) not in seen:
+            seen.add((st.line_no, st.kind))
+            visits.append(st)
+
+    # Drop an "enter" that its own "done" follows immediately with nothing
+    # changed — the line ran instantaneously, so the two frames are identical.
+    # A `def` line is arrived at twice: once as the statement that defines the
+    # function, and again when the function is CALLED. An entry narration on
+    # such a line describes stepping into it, so it belongs to the call — the
+    # definition keeps only its completion words.
+    called = {st.line_no for st in visits if st.kind == "call"}
+    pruned = []
+    for i, st in enumerate(visits):
+        nxt = visits[i + 1] if i + 1 < len(visits) else None
+        redundant = (st.kind == "enter" and nxt is not None
+                     and nxt.kind == "done" and nxt.line_no == st.line_no
+                     and nxt.disp == st.disp
+                     # ...unless the line gives the entry its OWN words, in
+                     # which case the two beats differ in what they SAY even
+                     # though the panel is identical, and dropping one would
+                     # silently lose that narration.
+                     and (st.line_no in called
+                          or not split_entry(code_marks[st.line_no].text)[0]))
+        if not redundant:
+            pruned.append(st)
+
+    # Comment-only markers ride after the nearest preceding code line's "done"
+    # — but only a line that actually GETS a beat counts as preceding, or a
+    # comment sitting under a function that is never called would be dropped
+    # along with it.
+    visited = sorted({st.line_no for st in pruned})
+    after = {}          # code line_no -> [comment markers to emit after it]
+    leading = []
+    for cm in comment_marks:
+        prior = [L for L in visited if L < cm.line_no]
+        if prior:
+            after.setdefault(prior[-1], []).append(cm)
+        else:
+            leading.append(cm)
+
+    def env_before(line_no):
+        env = {}
+        for st in steps:
+            if st.kind == "done" and st.line_no < line_no:
+                env = st.text
+        return env
+
+    beats = []
+    for cm in leading:
+        beats.append(Beat(revealed=None, highlight=None,
+                          narration=interpolate(split_entry(cm.text)[1],
+                                                env_before(cm.line_no)),
+                          state={}))
+    for st in pruned:
+        m = code_marks[st.line_no]
+        entry, completion = split_entry(m.text)
+        # "call" counts as an arrival, like "enter": it is the moment Python
+        # steps into the function, which is exactly what an entry narration is
+        # for ("we call add_one with 2").
+        text = completion if st.kind == "done" else entry
+        beats.append(Beat(
+            revealed=None, highlight=st.line_no,
+            narration=interpolate(text, st.text), state=st.disp))
+        if st.kind == "done":
+            for cm in after.pop(st.line_no, []):
+                beats.append(Beat(revealed=None, highlight=None,
+                                  narration=interpolate(split_entry(cm.text)[1],
+                                                        env_before(cm.line_no)),
+                                  state={}))
+
+    # Say so. Dropping narration is the documented behaviour, but silently
+    # losing half a snippet's commentary looks like a bug in the tool rather
+    # than an untaken branch or — much more often — a snippet that raised
+    # part-way and never reached the rest (trace_run() reports that separately,
+    # a few lines further up, which is easy to miss in a notebook).
+    narrated = {b.highlight for b in beats if b.narration and b.highlight}
+    dropped = [m.line_no for m in markers
+               if m.has_code and m.text.strip() and m.line_no not in narrated]
+    if dropped:
+        _say(f"note: --order exec has no beat for {len(dropped)} narrated "
+             f"line(s) that never ran to completion "
+             f"({', '.join(str(L) for L in dropped)}) — an untaken branch, or "
+             f"the snippet stopped early. Their code is still shown; only the "
+             f"narration is dropped.")
+    return beats
+
+
+def build_beats(code_lines, markers, steps, every, loop_ranges=None,
+                order=ORDER_SOURCE):
     loop_ranges = loop_ranges or {}
     code_marks = {m.line_no: m for m in markers if m.has_code}
     comment_marks = [m for m in markers if not m.has_code]
@@ -995,7 +1239,7 @@ def build_beats(code_lines, markers, steps, every, loop_ranges=None):
     # scope the line sits in, so only the first-exec `first` map below wants
     # them: env_before() would misreport them as the caller's state, and
     # --every would gain a beat per call.
-    line_steps = [st for st in steps if not st.call_entry]
+    line_steps = [st for st in steps if st.kind == "done"]
 
     def env_before(line_no):
         """Values from the last step that ran on a source line above this one."""
@@ -1004,6 +1248,9 @@ def build_beats(code_lines, markers, steps, every, loop_ranges=None):
             if st.line_no < line_no:
                 env = st.text
         return env
+
+    if order == ORDER_EXEC:
+        return _exec_beats(code_lines, markers, steps)
 
     if not every:
         first = {}  # line_no -> the Step whose state that line's beat shows
@@ -1015,7 +1262,7 @@ def build_beats(code_lines, markers, steps, every, loop_ranges=None):
             # `n = 7` instead of an empty panel — the def statement's own
             # post-state is never what a walkthrough is talking about. First
             # call wins, so a second call can't overwrite it.
-            if prev is None or (st.call_entry and not prev.call_entry):
+            if prev is None or (st.kind == "call" and prev.kind != "call"):
                 first[st.line_no] = st
         groups = _reveal_groups(code_lines, markers)
         beats = []
@@ -1025,16 +1272,21 @@ def build_beats(code_lines, markers, steps, every, loop_ranges=None):
                                   # once revealed, is never taken away again.
         for m in markers:
             revealed = revealed | groups[m.line_no]
+            # Only the completion half: source order has no entry visits to
+            # narrate. _warn_unused_entry_narration() says so rather than
+            # letting the text vanish without a word.
             if m.has_code:
                 st = first.get(m.line_no)
                 beats.append(Beat(
                     revealed=revealed, highlight=m.line_no,
-                    narration=interpolate(m.text, st.text if st else {}),
+                    narration=interpolate(split_entry(m.text)[1],
+                                          st.text if st else {}),
                     state=st.disp if st else {}))
             else:
                 beats.append(Beat(
                     revealed=revealed, highlight=None,
-                    narration=interpolate(m.text, env_before(m.line_no)),
+                    narration=interpolate(split_entry(m.text)[1],
+                                          env_before(m.line_no)),
                     state={}))
         return beats
 
@@ -1052,7 +1304,9 @@ def build_beats(code_lines, markers, steps, every, loop_ranges=None):
             nxt = next((s for s in steps[idx + 1:] if s.frame_id == st.frame_id), None)
             if nxt is None or not (lo <= nxt.line_no <= hi):
                 continue
-        exec_beats.append(Beat(None, st.line_no, interpolate(m.text, st.text), st.disp))
+        exec_beats.append(Beat(None, st.line_no,
+                               interpolate(split_entry(m.text)[1], st.text),
+                               st.disp))
 
     # Slot comment-only markers by source position; interpolate each with the
     # state that exists just before its line runs.
@@ -1060,15 +1314,19 @@ def build_beats(code_lines, markers, steps, every, loop_ranges=None):
     for eb in exec_beats:
         while ci < len(comment_marks) and comment_marks[ci].line_no <= eb.highlight:
             cm = comment_marks[ci]
-            beats.append(Beat(None, None, interpolate(cm.text, env_before(cm.line_no)), {}))
+            beats.append(Beat(None, None,
+                              interpolate(split_entry(cm.text)[1],
+                                          env_before(cm.line_no)), {}))
             ci += 1
         beats.append(eb)
     for cm in comment_marks[ci:]:                     # trailing outro comments
-        beats.append(Beat(None, None, interpolate(cm.text, env_before(cm.line_no)), {}))
+        beats.append(Beat(None, None,
+                          interpolate(split_entry(cm.text)[1],
+                                      env_before(cm.line_no)), {}))
     return beats
 
 
-def _two_pass_beats(code_lines, markers, steps):
+def _two_pass_beats(code_lines, markers, steps, order=ORDER_SOURCE):
     """Split every marker's text on TWO_PASS_SEP and build both beat
     sequences via the unmodified build_beats(): pass 1 ('writing') gets
     steps=[] so every beat's state is {} and {var} fields are left literal
@@ -1108,7 +1366,9 @@ def _two_pass_beats(code_lines, markers, steps):
         rank = {m.line_no: i for i, m in enumerate(m1)}
         m2 = sorted(m2, key=lambda m: rank[m.line_no])
     beats1 = build_beats(code_lines, m1, steps=[], every=False)
-    beats2 = build_beats(code_lines, m2, steps=steps, every=False)
+    # --order exec applies to the WALKTHROUGH only: pass 1 is someone writing
+    # the code, which happens top-to-bottom (or in the N) order they chose).
+    beats2 = build_beats(code_lines, m2, steps=steps, every=False, order=order)
     return beats1, beats2
 
 
@@ -1562,7 +1822,7 @@ def plan_canvas(code_lines, beats, show_panel, subtitles,
         asc, desc = font.getmetrics()
         lh = asc + desc + 8
         max_rows = max((len(b.state) for b in beats), default=0)
-        panel_h = 2 * PANEL_PAD + lh * (1 + max(1, max_rows))  # header + rows
+        panel_h = 2 * PANEL_PAD + lh * max(1, max_rows)
         code_h = max(code_h, panel_h)
 
     W = _even(PAD + code_w + (GAP + panel_w if panel_w else 0) + PAD)
@@ -1628,14 +1888,20 @@ def _draw_caption(canvas, cv, lines):
         y += clh
 
 
-def compose(cv, code_text, hl_lines, state, caption_lines, path):
-    """Render one full frame onto the fixed canvas and save it."""
+def compose(cv, code_text, hl_lines, state, caption_lines, path, show_panel=True):
+    """Render one full frame onto the fixed canvas and save it.
+
+    `show_panel=False` leaves the state box off this frame while still
+    RESERVING its space — the canvas is one fixed size for the whole video
+    (invariant 1), so the box can only be hidden, never removed. Used for
+    two-pass mode's writing pass, which runs with `steps=[]` and therefore
+    has an empty box on every single frame."""
     fonts = cv.fonts or _font_sizes()
     canvas = Image.new("RGB", (cv.W, cv.H), cv.bg)
     ox, oy = cv.off_x, cv.off_y            # 0, 0 unless --screenflow centred it
     canvas.paste(_render_code(code_text, hl_lines=hl_lines, style=cv.style,
                               font_size=fonts.code), (ox + PAD, oy + PAD))
-    if cv.panel_w:
+    if cv.panel_w and show_panel:
         canvas.paste(render_panel(state, cv.panel_w, cv.code_h, cv.panel, fonts),
                      (ox + PAD + cv.code_w + GAP, oy + PAD))
     if caption_lines is not None:
@@ -1645,7 +1911,8 @@ def compose(cv, code_text, hl_lines, state, caption_lines, path):
 
 
 def typing_frames(cv, code_lines, revealed_before, new_group, state, caption_lines,
-                  outdir, tag, typing_speed=TYPE_SPEED, n_frames=None, reach_full=False):
+                  outdir, tag, typing_speed=TYPE_SPEED, n_frames=None,
+                  reach_full=False, show_panel=True):
     """Frames that type the lines in `new_group` (a sorted, contiguous run of
     1-based source line numbers — one _reveal_groups() group) into their
     fixed row positions. Lines in `revealed_before` stay fully shown; every
@@ -1700,7 +1967,8 @@ def typing_frames(cv, code_lines, revealed_before, new_group, state, caption_lin
             else:
                 rows.append("")
         frames.append(compose(cv, "\n".join(rows), [], state, caption_lines,
-                              os.path.join(sub, f"{i:03d}.png")))
+                              os.path.join(sub, f"{i:03d}.png"),
+                              show_panel=show_panel))
     return frames
 
 
@@ -1938,7 +2206,8 @@ def make_pass1_code_clip(cv, code_lines, revealed_before, new_group, caption_lin
     total = len(stream)
     typing_n_frames = min(TYPE_MAXFRAMES, max(1, round(total * typing_speed * FPS)))
     frames = typing_frames(cv, code_lines, revealed_before, new_group, {}, caption_lines,
-                           outdir, tag, n_frames=typing_n_frames, reach_full=True)
+                           outdir, tag, n_frames=typing_n_frames, reach_full=True,
+                           show_panel=False)
     if not frames:
         return None
     if audio is not None:
@@ -2121,10 +2390,12 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
             if clip:
                 clips.append(clip)
                 pause_frame = compose(cv, _visible_code(code_lines, beat.revealed), [], {},
-                                      caption, os.path.join(work, f"p1_pausehold_{k:03d}.png"))
+                                      caption, os.path.join(work, f"p1_pausehold_{k:03d}.png"),
+                                      show_panel=False)
         elif beat.narration:
             hold = compose(cv, _visible_code(code_lines, beat.revealed), [], {},
-                           caption, os.path.join(work, f"p1_hold_{k:03d}.png"))
+                           caption, os.path.join(work, f"p1_hold_{k:03d}.png"),
+                           show_panel=False)
             audio = _cached_synth(synth, audio_cache, beat.narration, work,
                                   f"p1b_{k:03d}", pause_mode)
             clip = os.path.join(work, f"p1_clip_{k:03d}.mp4")
@@ -2144,7 +2415,7 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
             clips.append(pclip)
 
         prev_revealed = beat.revealed
-        print(f"  [pass1 {k+1}/{len(beats1)}] {beat.narration[:60] or '(silent)'}")
+        _say(f"  [pass1 {k+1}/{len(beats1)}] {beat.narration[:60] or '(silent)'}")
 
     off = len(beats1)
     # Pass 1 already typed everything up to the last marked line — pass 2
@@ -2161,10 +2432,12 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
     # for a comment-only final marker with no pass-1 narration, in which
     # case the same fully-typed frame is composed directly.
     if pause > 0 and beats2:
+        # Still a pass-1 frame — the writing pass holding its finished code —
+        # so the box stays hidden right up to the seam.
         hold = pause_frame or compose(
             cv, _visible_code(code_lines, final_revealed), [], {},
             cv.captions[off - 1] if cv.captions is not None else None,
-            os.path.join(work, "p1_endhold.png"))
+            os.path.join(work, "p1_endhold.png"), show_panel=False)
         pclip = os.path.join(work, "p1_pause_end.mp4")
         make_pause_clip(hold, pause, pclip)
         clips.append(pclip)
@@ -2186,12 +2459,13 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
             pclip = os.path.join(work, f"p2_pause_{k:03d}.mp4")
             make_pause_clip(hold, pause, pclip)
             clips.append(pclip)
-        print(f"  [pass2 {k+1}/{len(beats2)}] {beat.narration[:60] or '(silent)'}")
+        _say(f"  [pass2 {k+1}/{len(beats2)}] {beat.narration[:60] or '(silent)'}")
 
     return clips
 
 
-def _build_all_beats(source_path, trace, every, allow_unnarrated=False):
+def _build_all_beats(source_path, trace, every, allow_unnarrated=False,
+                     order=ORDER_SOURCE):
     """Shared parse -> two-pass-detect -> validate -> trace -> beats
     preamble used by build(), export_script(), and record_narration().
     Returns (code_lines, beats1, beats2, unnarrated): beats1 is the two-pass
@@ -2220,10 +2494,25 @@ def _build_all_beats(source_path, trace, every, allow_unnarrated=False):
             sys.exit("Nothing to render: the snippet has no code lines.")
         unnarrated = True
 
+    if order == ORDER_EXEC:
+        if not trace:
+            sys.exit("--order exec needs execution to know the order; "
+                     "drop --no-trace.")
+        if every:
+            sys.exit("--order exec has no meaning with --every, which already "
+                     "plays one beat per execution; drop one of them.")
+
     two_pass = any(TWO_PASS_SEP in m.text for m in markers)
     if two_pass and every:
         sys.exit("Two-pass narration ('/' in a marker) isn't supported with "
                  "--every; remove the '/' or drop --every.")
+    if order == ORDER_EXEC and any(
+            _parse_order(split_narration(m.text)[1] if two_pass else m.text)[0]
+            is not None for m in markers):
+        sys.exit("--order exec and numbered 'N) ' prefixes are two different "
+                 "orders for the same pass — drop one. (In two-pass mode only "
+                 "the walkthrough side is affected; number the writing side "
+                 "instead if you want that ordered.)")
     if not two_pass:
         if every and any(_parse_order(m.text)[0] is not None for m in markers):
             sys.exit("Numbered 'N) ' order prefixes require first-exec mode; "
@@ -2231,13 +2520,22 @@ def _build_all_beats(source_path, trace, every, allow_unnarrated=False):
                      "reference is one — inline its body to drop it).")
         markers = order_markers(markers, [m.text for m in markers])
 
-    steps = trace_run(source, source_path) if trace else []
+    # The entry half only ever belongs to the walkthrough, so check the texts
+    # that will actually be used: pass 2's in two-pass mode, the whole thing
+    # otherwise.
+    _warn_unused_entry_narration(
+        [Marker(m.line_no, split_narration(m.text)[1] if two_pass else m.text,
+                m.has_code) for m in markers], order)
+
+    steps = (trace_run(source, source_path, entries=(order == ORDER_EXEC))
+             if trace else [])
     if two_pass:
-        beats1, beats2 = _two_pass_beats(code_lines, markers, steps)
+        beats1, beats2 = _two_pass_beats(code_lines, markers, steps, order)
     else:
         loop_ranges = loop_body_ranges(source) if every else {}
         beats1 = []
-        beats2 = build_beats(code_lines, markers, steps, every=every, loop_ranges=loop_ranges)
+        beats2 = build_beats(code_lines, markers, steps, every=every,
+                             loop_ranges=loop_ranges, order=order)
     return code_lines, beats1, beats2, unnarrated
 
 
@@ -2246,7 +2544,8 @@ def build(source_path, out_path, tts, trace=True, every=False,
           manual_audio_dir=None, style=None, bg_color=_USE_DEFAULT,
           state_bg_color=None, state_fg_color=None,
           highlight_color=_USE_DEFAULT, allow_unnarrated=False,
-          font_size=None, screenflow=None):
+          font_size=None, screenflow=None, quiet=False,
+          order=ORDER_SOURCE):
     """
     Render an annotated Python snippet into a narrated screencast video.
 
@@ -2318,6 +2617,11 @@ def build(source_path, out_path, tts, trace=True, every=False,
         edge. A snippet whose natural canvas is larger than the frame raises
         `ValueError` (the CLI turns that into an exit naming a `font_size`
         that would fit) rather than being silently shrunk.
+    quiet :
+        Suppress every progress line, note and trace warning — and whatever
+        the snippet itself prints while being traced. Errors are NOT
+        suppressed: they still raise/`sys.exit` to stderr, so a quiet run
+        that fails can't be mistaken for one that succeeded.
     manual_audio_dir :
         Directory of pre-recorded audio files for `tts="manual"`, named
         001.wav, 002.wav, ... (or .mp3/.m4a/.aiff/.flac/.ogg) matching
@@ -2343,10 +2647,9 @@ def build(source_path, out_path, tts, trace=True, every=False,
         `None` keeps it.
     state_fg_color :
         `"#rrggbb"` for ALL of the state panel's text — variable names and
-        values both — with the "STATE" header blended `HEADER_DIM` toward the
-        panel background so it stays subordinate. `None` keeps the default
-        three-color scheme (`COL_NAME`/`COL_VALUE`/`COL_HEADER`), which is
-        also where to go for finer control than one color gives.
+        values both. `None` keeps the default two-color scheme
+        (`COL_NAME`/`COL_VALUE`), which is also where to go for finer control
+        than one color gives.
     bg_color :
         `"#rrggbb"` background behind both the code and the canvas, overriding
         whatever background `style` declares (its syntax colors are left
@@ -2396,6 +2699,19 @@ def build(source_path, out_path, tts, trace=True, every=False,
     [](`snippet_cast.screencast.main`)
     [](`snippet_cast.screencast.export_script`)
     """
+    with _quieted(quiet):
+        _build(source_path, out_path, tts, trace, every, subtitles, typing,
+               typing_speed, pause, manual_audio_dir, style, bg_color,
+               state_bg_color, state_fg_color, highlight_color,
+               allow_unnarrated, font_size, screenflow, order)
+
+
+def _build(source_path, out_path, tts, trace, every, subtitles, typing,
+           typing_speed, pause, manual_audio_dir, style, bg_color,
+           state_bg_color, state_fg_color, highlight_color,
+           allow_unnarrated, font_size, screenflow, order=ORDER_SOURCE):
+    """build()'s body, split out only so build() can wrap the whole thing in
+    _quieted() without indenting every line of it."""
     if tts == "manual":
         if not manual_audio_dir:
             sys.exit("--tts manual requires --manual-audio-dir DIR.")
@@ -2409,7 +2725,7 @@ def build(source_path, out_path, tts, trace=True, every=False,
     # trace_run() executes the snippet, not after.
     code_lines, beats1, beats2, unnarrated = _build_all_beats(
         source_path, trace, every,
-        allow_unnarrated=allow_unnarrated and pause > 0)
+        allow_unnarrated=allow_unnarrated and pause > 0, order=order)
     _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
                        every, subtitles, typing, typing_speed, pause,
                        style, bg_color, state_bg_color, state_fg_color,
@@ -2436,8 +2752,8 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
     here — only the single-pass path below has to handle it.)"""
     two_pass = bool(beats1)
     if two_pass and typing:
-        print("note: --typing has no effect in two-pass mode ('/' in a "
-              "marker) — the writing pass always types the new code in.")
+        _say("note: --typing has no effect in two-pass mode ('/' in a "
+             "marker) — the writing pass always types the new code in.")
     # '..' narration pause markers: "say" rewrites them to its own inline
     # [[slnc N]] markup (one synth() call, natural prosody); other real
     # speech backends split/stitch with a generated silence clip; the manual
@@ -2448,9 +2764,9 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
     work = tempfile.mkdtemp(prefix="screencast_")
 
     if two_pass:
-        print(f"{len(beats1)+len(beats2)} beats ({len(beats1)} pass-1 + "
-              f"{len(beats2)} pass-2) -> {out_path}  (backend: {tts}, "
-              f"trace: {'on' if trace else 'off'}, two-pass)")
+        _say(f"{len(beats1)+len(beats2)} beats ({len(beats1)} pass-1 + "
+             f"{len(beats2)} pass-2) -> {out_path}  (backend: {tts}, "
+             f"trace: {'on' if trace else 'off'}, two-pass)")
         cv = _plan_canvas_or_exit(code_lines, beats1 + beats2, show_panel=trace,
                          subtitles=subtitles, style=style, bg_color=bg_color,
                          state_bg_color=state_bg_color,
@@ -2462,7 +2778,7 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
                                  audio_cache, typing_speed, pause, pause_mode)
         concat(clips, out_path, work)
         shutil.rmtree(work, ignore_errors=True)
-        print("done.")
+        _say("done.")
         return
 
     beats = beats2
@@ -2471,13 +2787,13 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
                                  " +typing" if typing else ""])
     if unnarrated:
         if subtitles:
-            print("note: --subtitles has no effect without narration.")
-        print(f"{len(beats)} beats -> {out_path}  "
-              f"(no narration: {pause:g}s per frame, "
-              f"trace: {'on' if trace else 'off'}, {mode}{extras})")
+            _say("note: --subtitles has no effect without narration.")
+        _say(f"{len(beats)} beats -> {out_path}  "
+             f"(no narration: {pause:g}s per frame, "
+             f"trace: {'on' if trace else 'off'}, {mode}{extras})")
     else:
-        print(f"{len(beats)} beats -> {out_path}  "
-              f"(backend: {tts}, trace: {'on' if trace else 'off'}, {mode}{extras})")
+        _say(f"{len(beats)} beats -> {out_path}  "
+             f"(backend: {tts}, trace: {'on' if trace else 'off'}, {mode}{extras})")
     cv = _plan_canvas_or_exit(code_lines, beats, show_panel=trace, subtitles=subtitles,
                      style=style, bg_color=bg_color,
                      state_bg_color=state_bg_color, state_fg_color=state_fg_color,
@@ -2513,6 +2829,16 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
             # make every frame 2*pause).
             make_pause_clip(hold, pause, nclip)
             clips.append(nclip)
+        elif not beat.narration:
+            # A silent beat — --order exec's entry/call visits, which carry no
+            # narration by design. Hold the frame rather than synthesizing "":
+            # an empty synth is a near-zero-length clip, and for --tts manual
+            # it would consume a numbered recording and desync every beat
+            # after it from --export-script's numbering (the same rule
+            # _narration_sequence() already applies, and what two-pass mode
+            # does for an empty part 2).
+            make_pause_clip(hold, PART2_EMPTY_HOLD, nclip)
+            clips.append(nclip)
         else:
             audio = _cached_synth(synth, audio_cache, beat.narration, work,
                                   f"{k:03d}", pause_mode)
@@ -2530,11 +2856,11 @@ def _render_from_beats(code_lines, beats1, beats2, out_path, tts, synth, trace,
         label = beat.narration[:60]
         if not label and beat.highlight:
             label = code_lines[beat.highlight - 1].strip()[:60]
-        print(f"  [{k+1}/{len(beats)}] {label or '(silent)'}")
+        _say(f"  [{k+1}/{len(beats)}] {label or '(silent)'}")
 
     concat(clips, out_path, work)
     shutil.rmtree(work, ignore_errors=True)
-    print("done.")
+    _say("done.")
 
 
 def _narration_sequence(beats1, beats2):
@@ -2589,14 +2915,21 @@ def _format_script(beats1, beats2):
     return lines
 
 
-def export_script(source_path, trace=True, every=False):
+def export_script(source_path, trace=True, every=False, quiet=False,
+                  order=ORDER_SOURCE):
     """Parse `source_path`, build beats for both passes (or just the
     walkthrough pass, for a file with no '/'), and return the ordered,
     numbered narration script — the exact order/dedup `build()` uses to
     request audio — as a list of printable lines. Touches no ffmpeg/ffprobe,
     so it works even where those aren't installed. Use this to know exactly
-    what to record for `tts="manual"`."""
-    _, beats1, beats2, _ = _build_all_beats(source_path, trace, every)
+    what to record for `tts="manual"`.
+
+    `quiet` silences the trace's own warnings (and anything the snippet
+    prints while being traced), leaving just the script — the returned lines
+    are the RESULT, so they are never suppressed."""
+    with _quieted(quiet):
+        _, beats1, beats2, _ = _build_all_beats(source_path, trace, every,
+                                                order=order)
     return _format_script(beats1, beats2)
 
 
@@ -2789,6 +3122,7 @@ def record_narration(source_path, manual_audio_dir, out_path, trace=True,
                      build_after=True, input_fn=input,
                      record_fn=_record_until_enter, play_fn=_play,
                      frame_fn=None, font_size=None, screenflow=None,
+                     order=ORDER_SOURCE,
                      style=None, bg_color=_USE_DEFAULT,
                      state_bg_color=None, state_fg_color=None,
                      highlight_color=_USE_DEFAULT):
@@ -2870,7 +3204,8 @@ def record_narration(source_path, manual_audio_dir, out_path, trace=True,
                  "(uses system_profiler/avfoundation/afplay).")
     os.makedirs(manual_audio_dir, exist_ok=True)
 
-    code_lines, beats1, beats2, _ = _build_all_beats(source_path, trace, every)
+    code_lines, beats1, beats2, _ = _build_all_beats(source_path, trace, every,
+                                                    order=order)
     two_pass = bool(beats1)
     final_pass1_revealed = beats1[-1].revealed if beats1 else None
 
@@ -3001,8 +3336,19 @@ def resolve_env_defaults(args, **fallbacks):
     return args
 
 
+BG_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}\Z")
+BG_COLOR_NONE = "none"   # --bg-color spelling for "use the style's own background"
+STYLE_LIST_ARG = "list"  # --style spelling that prints every valid name and exits
+
 SCREENFLOW_RE = re.compile(r"(\d{1,5})\s*[xX*]\s*(\d{1,5})\Z")
 SCREENFLOW_TRUTHY = ("1", "true", "yes", "on")
+# ...and the way to say "off". Without these the env var could only ever be
+# turned ON: unset meant off, but every spelling of off — including the
+# 'none' this codebase uses for exactly that in --bg-color, --highlight-color
+# and the --state-*-colors — was a hard error. Setting
+# SNIPPET_CAST_SCREENFLOW=none in a shell profile or a notebook setup cell
+# then broke every later run.
+SCREENFLOW_FALSEY = ("", "0", "false", "no", "off", BG_COLOR_NONE)
 
 
 def resolve_screenflow_arg(raw):
@@ -3015,13 +3361,16 @@ def resolve_screenflow_arg(raw):
 
     Accepts `WxH` and, so the environment variable can act as a plain
     on-switch the way the bare flag does, any of SCREENFLOW_TRUTHY (meaning
-    SCREENFLOW_SIZE). Odd dimensions are rounded up: libx264 needs even ones.
+    SCREENFLOW_SIZE) — or any of SCREENFLOW_FALSEY, including `"none"`, to
+    turn it back off. Odd dimensions are rounded up: libx264 needs even ones.
     """
     if raw is None or raw is False:
         return None
     if raw is True:
         raw = SCREENFLOW_SIZE
-    text = str(raw).strip()
+    text = _unquote(str(raw).strip())
+    if text.lower() in SCREENFLOW_FALSEY:
+        return None
     if text.lower() in SCREENFLOW_TRUTHY:
         text = SCREENFLOW_SIZE
     m = SCREENFLOW_RE.match(text)
@@ -3042,9 +3391,6 @@ def resolve_screenflow_arg(raw):
     return w, h
 
 
-BG_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}\Z")
-BG_COLOR_NONE = "none"   # --bg-color spelling for "use the style's own background"
-STYLE_LIST_ARG = "list"  # --style spelling that prints every valid name and exits
 
 
 def resolve_style_args(style, bg_color, highlight_color=None):
@@ -3084,6 +3430,22 @@ def resolve_style_args(style, bg_color, highlight_color=None):
                            allow=(HIGHLIGHT_PANEL,)))
 
 
+def _unquote(value):
+    """Strip one matched pair of surrounding quotes.
+
+    The two front ends disagree about quoting and neither can be changed: on
+    the CLI a bare '#rrggbb' would be swallowed as a shell comment, so the
+    docs (rightly) show --bg-color '#1F1F1F' and the shell removes the quotes
+    before argparse ever sees them. In a %%snippet-cast line there is no
+    shell — IPython's parse_argstring hands the value over with the quotes
+    still attached — so the exact spelling the docs teach was rejected as
+    not-a-hex-color. Unquoting here makes both spellings work in both places
+    (a no-op on the CLI, where they are already gone)."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1].strip()
+    return value
+
+
 def _hex_color_arg(flag, value, none_means, allow=()):
     """One raw color string from `main()`/the cell magic -> '#rrggbb' or None.
 
@@ -3094,7 +3456,7 @@ def _hex_color_arg(flag, value, none_means, allow=()):
     pass through untouched (HIGHLIGHT_PANEL, for --highlight-color)."""
     if not isinstance(value, str):
         return value
-    value = value.strip()
+    value = _unquote(value.strip())
     if value.lower() == BG_COLOR_NONE:
         return None
     if value.lower() in allow:
@@ -3196,7 +3558,7 @@ def main():
                          f"[default: {PANEL_BG}; env: SNIPPET_CAST_STATE_BG_COLOR]")
     ap.add_argument("--state-fg-color", default=None, metavar="HEX",
                     help="text in the state panel as '#rrggbb' — names and "
-                         "values both, with the header dimmed to match; "
+                         "values both; "
                          f"{BG_COLOR_NONE!r} keeps the default green-on-white "
                          "scheme [env: SNIPPET_CAST_STATE_FG_COLOR]")
     ap.add_argument("--pause", type=float, default=None, metavar="SECONDS",
@@ -3222,6 +3584,21 @@ def main():
                     help="interactively record narration via the system microphone "
                          "(macOS only), then build with --tts manual (implied "
                          "automatically); see SETUP.md [env: SNIPPET_CAST_RECORD]")
+    ap.add_argument("--order", choices=[ORDER_SOURCE, ORDER_EXEC], default=None,
+                    help="playback order of the narrated lines: "
+                         f"{ORDER_SOURCE!r} (top to bottom, or the 'N) ' order "
+                         f"the file gives) or {ORDER_EXEC!r} (the order Python "
+                         "visits them — each line highlighted on entry with its "
+                         "pre-state, then again on completion, where the "
+                         "narration plays). 'exec' needs the trace and is "
+                         "redundant with --every "
+                         f"[default: {ORDER_SOURCE}; env: SNIPPET_CAST_ORDER]")
+    ap.add_argument("-q", "--quiet", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="suppress progress, notes and the traced snippet's own "
+                         "output; errors still go to stderr, and "
+                         "--export-script/--style list still print their result "
+                         "[env: SNIPPET_CAST_QUIET]")
     ap.add_argument("--no-frame", action="store_true", default=None,
                     help="with --record, don't pop each beat's rendered frame in "
                          "the system image viewer [env: SNIPPET_CAST_NO_FRAME]")
@@ -3253,23 +3630,41 @@ def main():
     # Captured before resolve_env_defaults fills in the "say"/manual_audio_dir
     # fallbacks below, so --record can tell an explicit --tts/env var apart
     # from the hardcoded default it's about to silently override.
-    tts_explicit = args.tts is not None or os.environ.get("SNIPPET_CAST_TTS") is not None
-    manual_dir_explicit = (args.manual_audio_dir is not None
-                           or os.environ.get("SNIPPET_CAST_MANUAL_AUDIO_DIR") is not None)
+    # Flag only, deliberately: the check below exists to catch someone
+    # typing "--record --tts say", not to veto --record because a
+    # project-wide activation env happens to name a backend.
+    tts_explicit = args.tts is not None
+    # Compared against the default, not merely "is it set": a project-wide
+    # activation env (pixi's [tool.pixi.activation.env], a shell profile) may
+    # materialise EVERY SNIPPET_CAST_* var at its default value, and that is
+    # not the mistake this check exists to catch — which is passing an audio
+    # directory while forgetting --tts manual. Treating a default-valued env
+    # var as "explicit" made a bare invocation exit here and render nothing.
+    _env_manual_dir = os.environ.get("SNIPPET_CAST_MANUAL_AUDIO_DIR")
+    manual_dir_explicit = (
+        args.manual_audio_dir is not None
+        or (_env_manual_dir is not None
+            and _env_manual_dir != MANUAL_AUDIO_DIR_DEFAULT))
     # Same trick for --pause: asking for a specific frame length is what opts
     # a narration-less snippet into a silent render (build(allow_unnarrated=)).
     # PAUSE_DEFAULT is > 0, so testing the resolved value can't tell "I want
     # silent frames this long" from "I never mentioned --pause" — and a
     # forgotten '#:' must still report No narration found.
-    pause_explicit = args.pause is not None or os.environ.get("SNIPPET_CAST_PAUSE") is not None
+    pause_explicit = (args.pause is not None
+                      or (os.environ.get("SNIPPET_CAST_PAUSE") not in
+                          (None, str(PAUSE_DEFAULT))))
     resolve_env_defaults(
         args, tts="say", no_trace=False, every=False, subtitles=False, typing=False,
         typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT, export_script=False,
         manual_audio_dir=MANUAL_AUDIO_DIR_DEFAULT, record=False, no_frame=False,
+        quiet=False, order=ORDER_SOURCE,
         name="out", output_dir=".", style=STYLE,
         bg_color=BG_COLOR if BG_COLOR else BG_COLOR_NONE,
         state_bg_color=PANEL_BG, state_fg_color=None,
         highlight_color=HIGHLIGHT_COLOR, font_size=FONT_SIZE, screenflow=None)
+    global _QUIET
+    _QUIET = bool(args.quiet)     # covers every _say() from here on, including
+                                  # the argument-validation notes just below
     if args.style == STYLE_LIST_ARG:
         # A listing query, not a render — the one invocation with no input
         # file, which is why `input` is nargs="?" above. Every other path
@@ -3300,7 +3695,7 @@ def main():
     if args.every and args.no_trace:
         sys.exit("--every needs execution; drop --no-trace.")
     if args.typing and args.every:
-        print("note: --typing has no effect with --every (full code is already shown).")
+        _say("note: --typing has no effect with --every (full code is already shown).")
     if args.pause < 0:
         sys.exit("--pause must be >= 0.")
     if args.typing_speed <= 0:
@@ -3309,6 +3704,9 @@ def main():
         sys.exit(f"--font-size must be >= {FONT_SIZE_MIN}.")
 
     if args.record:
+        if args.quiet:
+            sys.exit("--quiet can't be used with --record: recording is an "
+                     "interactive session whose prompts are that output.")
         if tts_explicit and args.tts != "manual":
             sys.exit(f"--record always uses the manual backend; got --tts {args.tts!r}. "
                      "Drop --tts (or set it to manual) when using --record.")
@@ -3317,7 +3715,9 @@ def main():
         sys.exit("--manual-audio-dir only applies with --tts manual (or --record).")
 
     if args.export_script:
-        for line in export_script(args.input, trace=not args.no_trace, every=args.every):
+        for line in export_script(args.input, trace=not args.no_trace,
+                                  every=args.every, quiet=args.quiet,
+                                  order=args.order):
             print(line)
         return
 
@@ -3348,7 +3748,7 @@ def main():
                          subtitles=args.subtitles, typing=args.typing,
                          typing_speed=args.typing_speed, pause=args.pause,
                          show_frame=not args.no_frame, font_size=args.font_size,
-                         screenflow=args.screenflow,
+                         screenflow=args.screenflow, order=args.order,
                          style=args.style, bg_color=args.bg_color,
                          state_bg_color=args.state_bg_color,
                          state_fg_color=args.state_fg_color,
@@ -3363,7 +3763,8 @@ def main():
           style=args.style, bg_color=args.bg_color,
           state_bg_color=args.state_bg_color, state_fg_color=args.state_fg_color,
           highlight_color=args.highlight_color, allow_unnarrated=pause_explicit,
-          font_size=args.font_size, screenflow=args.screenflow)
+          font_size=args.font_size, screenflow=args.screenflow,
+          quiet=args.quiet, order=args.order)
 
 
 if __name__ == "__main__":

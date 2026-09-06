@@ -17,6 +17,10 @@ snippet_cast.screencast.build(
     state_bg_color=None,
     state_fg_color=None,
     highlight_color=_USE_DEFAULT,
+    allow_unnarrated=False,
+    font_size=None,
+    screenflow=None,
+    quiet=False,
 )
 ```
 
@@ -62,7 +66,23 @@ still-frame-plus-narration clip per beat into `out_path` with ffmpeg.
 
 <code>[**pause**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [PAUSE_DEFAULT]{.parameter-default}</code>
 
-:   Seconds of silence to hold on each beat's frame after its narration finishes, before the next beat begins [default: `PAUSE_DEFAULT`]. `0` cuts directly from one beat's narration to the next. In two-pass mode it applies within both passes and at the seam between them (the writing pass holds its finished code for `pause` seconds before the walkthrough starts). Never appended after the video's final beat.
+:   Seconds of silence to hold on each beat's frame after its narration finishes, before the next beat begins [default: `PAUSE_DEFAULT`]. `0` cuts directly from one beat's narration to the next. In two-pass mode it applies within both passes and at the seam between them (the writing pass holds its finished code for `pause` seconds before the walkthrough starts). Never appended after the video's final beat. With `allow_unnarrated=True` on a snippet that has no narration at all, it is instead the full length of every beat.
+
+<code>[**allow_unnarrated**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [False]{.parameter-default}</code>
+
+:   Render a snippet with no ``#:`` comments at all instead of exiting with "No narration found": one beat per code line, progressively revealed, each held for `pause` seconds with no audio synthesized (no TTS backend is used, whatever `tts` says). Intended for producing a silent, evenly paced screencast to narrate afterwards in a video editor. Requires `pause` > 0, since it is the whole length of each beat. The CLI turns this on exactly when ``--pause`` is given explicitly (or via `SNIPPET_CAST_PAUSE`), so a forgotten ``#:`` still reports the error rather than silently rendering.
+
+<code>[**font_size**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [None]{.parameter-default}</code>
+
+:   Code font size in pixels for this render [default: `FONT_SIZE`]. The state panel and the captions scale with it, each keeping the offset it has from `FONT_SIZE` in the module constants — so a `PANEL_FONT_SIZE` edited to differ stays that much apart. `None` means "use `FONT_SIZE`", which renders exactly as it did before this option existed. Values below `FONT_SIZE_MIN` are clamped (the CLI rejects them outright). Changing it resizes the whole canvas, which is fine — `plan_canvas()` measures the frame at this size — but it must be decided once per video, never per frame (invariant 1).
+
+<code>[**screenflow**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [None]{.parameter-default}</code>
+
+:   Target frame as a `(width, height)` pair (see `resolve_screenflow_arg()`), or None for a canvas sized to the snippet. The content block keeps its natural size and is CENTRED in that frame — nothing is scaled, so text stays crisp and the caption band stays under the code rather than pinned to the frame's bottom edge. A snippet whose natural canvas is larger than the frame raises `ValueError` (the CLI turns that into an exit naming a `font_size` that would fit) rather than being silently shrunk.
+
+<code>[**quiet**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [False]{.parameter-default}</code>
+
+:   Suppress every progress line, note and trace warning — and whatever the snippet itself prints while being traced. Errors are NOT suppressed: they still raise/`sys.exit` to stderr, so a quiet run that fails can't be mistaken for one that succeeded.
 
 <code>[**manual_audio_dir**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [None]{.parameter-default}</code>
 
@@ -74,7 +94,7 @@ still-frame-plus-narration clip per beat into `out_path` with ffmpeg.
 
 <code>[**highlight_color**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [_USE_DEFAULT]{.parameter-default}</code>
 
-:   `"#rrggbb"` band behind the highlighted code line, overriding the style's own `highlight_color`. `None` uses the style's; omit the argument to use the `HIGHLIGHT_COLOR` global. Worth setting for a style that declares none — pygments' unset default is a pale `#ffffcc` (`DarkModernStyle`/`LightModernStyle` are both in that boat); a style loaded from a `.theme` file gets one derived instead.
+:   `"#rrggbb"` band behind the highlighted code line, overriding the style's own `highlight_color`. `HIGHLIGHT_PANEL` (`"panel"`, the shipped `HIGHLIGHT_COLOR` default) tracks the STATE panel background, including a per-run `state_bg_color`, so the band and the box read as one surface. `None` uses the style's; omit the argument to use the `HIGHLIGHT_COLOR` global. Worth setting for a style that declares none — pygments' unset default is a pale `#ffffcc` (`DarkModernStyle`/`LightModernStyle` are both in that boat); a style loaded from a `.theme` file gets one derived instead.
 
 <code>[**state_bg_color**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [None]{.parameter-default}</code>
 

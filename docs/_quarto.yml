@@ -1,7 +1,12 @@
 project:
   type: website
   output-dir: _build
-  # resources:
+  resources:
+    # %%snippet-cast writes its .mp4 as a side effect of executing the cell and
+    # displays it with a relative <video src>. Quarto does not discover a
+    # resource that way, so without this the videos are simply absent from
+    # _build and every one of them renders as a 300x150 black box.
+    - "**/*.mp4"
   #   - objects.txt
   #   - objects-test.txt
 

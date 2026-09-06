@@ -45,6 +45,7 @@ from snippet_cast.screencast import (
     resolve_output_path,
     resolve_screenflow_arg,
     resolve_style_args,
+    split_entry,
     split_narration,
     trace_run,
 )
@@ -239,7 +240,6 @@ def test_font_sizes_default_matches_the_module_constants():
     assert _font_sizes().code == FONT_SIZE
     assert _font_sizes().panel == sc.PANEL_FONT_SIZE
     assert _font_sizes().caption == max(14, FONT_SIZE - 4)
-    assert _font_sizes().panel_header == max(12, sc.PANEL_FONT_SIZE - 8)
 
 
 def test_font_sizes_scale_every_size_together():
@@ -247,7 +247,6 @@ def test_font_sizes_scale_every_size_together():
     assert big.code == FONT_SIZE + 14
     assert big.panel == sc.PANEL_FONT_SIZE + 14          # shipped offset is 0
     assert big.caption == _font_sizes().caption + 14
-    assert big.panel_header == _font_sizes().panel_header + 14
 
 
 def test_font_sizes_preserve_a_deliberate_panel_offset(monkeypatch):
@@ -264,7 +263,6 @@ def test_font_sizes_floor_and_clamp_small_sizes():
     for size in range(FONT_SIZE_MIN, FONT_SIZE + 1):
         f = _font_sizes(size)
         assert f.caption <= f.code
-        assert f.panel_header <= f.panel
 
 
 def test_plan_canvas_carries_and_grows_with_the_font_size():
@@ -327,6 +325,26 @@ def test_build_accepts_font_size(tmp_path):
     assert w > base.W and h > base.H
 
 
+def test_hex_colors_accept_the_quoting_each_front_end_produces():
+    """The CLI needs quotes (a bare '#rrggbb' is a shell comment) and strips
+    them before argparse sees them; IPython's parse_argstring does NOT, so the
+    exact spelling the docs teach arrived quoted and was rejected as
+    not-a-hex-color. Both spellings must work in both places."""
+    for spelling in ("#1F1F1F", "'#1F1F1F'", '"#1F1F1F"'):
+        assert resolve_style_args("monokai", spelling)[1] == "#1F1F1F"
+    for spelling in ("none", "'none'"):
+        assert resolve_style_args("monokai", spelling)[1] is None
+    assert resolve_panel_args("'#181818'", None)[0] == "#181818"
+    assert resolve_screenflow_arg("'1280x720'") == (1280, 720)
+
+
+def test_unquote_leaves_unmatched_or_inner_quotes_alone():
+    assert sc._unquote("#1F1F1F") == "#1F1F1F"
+    assert sc._unquote("'#1F1F1F") == "'#1F1F1F"     # unmatched
+    assert sc._unquote('"#1F1F1F') == '"#1F1F1F'
+    assert sc._unquote("") == ""
+
+
 def test_resolve_screenflow_arg_accepts_its_spellings():
     assert resolve_screenflow_arg(None) is None
     assert resolve_screenflow_arg(False) is None
@@ -338,6 +356,15 @@ def test_resolve_screenflow_arg_accepts_its_spellings():
     assert resolve_screenflow_arg("on") == resolve_screenflow_arg(SCREENFLOW_SIZE)
     # libx264 needs even dimensions.
     assert resolve_screenflow_arg("1921x1081") == (1922, 1082)
+
+
+def test_resolve_screenflow_arg_can_be_turned_off():
+    """The env var could only ever be switched ON: unset meant off, but every
+    spelling of off — including the 'none' used for exactly that by
+    --bg-color and friends — was a hard error, so materialising the default
+    into a shell profile broke every later run."""
+    for off in ("none", "NONE", "off", "0", "false", "no", ""):
+        assert resolve_screenflow_arg(off) is None
 
 
 def test_resolve_screenflow_arg_rejects_bad_values():
@@ -420,16 +447,84 @@ def test_screenflow_frame_keeps_the_content_pixel_identical(tmp_path):
     assert list(crop.getdata()) == list(plain.getdata())
 
 
+def test_quieted_nesting_can_only_tighten():
+    sc._say("visible")
+    with sc._quieted(True):
+        assert sc._QUIET is True
+        with sc._quieted(False):
+            assert sc._QUIET is True     # an inner False cannot un-quiet
+    assert sc._QUIET is False            # and the flag is always restored
+
+
+def test_quieted_restores_the_flag_after_an_exception():
+    with pytest.raises(RuntimeError):
+        with sc._quieted(True):
+            raise RuntimeError("boom")
+    assert sc._QUIET is False
+
+
+def test_export_script_quiet_drops_warnings_but_keeps_the_script(tmp_path, capsys):
+    src = tmp_path / "bad.py"
+    src.write_text("x = 1  #: one\nfor i in\n")      # deliberate syntax error
+
+    noisy = export_script(str(src))
+    assert "cannot trace" in capsys.readouterr().out
+
+    quiet = export_script(str(src), quiet=True)
+    assert capsys.readouterr().out == ""
+    assert quiet == noisy               # the script itself is the RESULT
+
+
+@pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
+def test_build_quiet_prints_nothing_at_all(tmp_path, capsys):
+    """Including whatever the traced snippet itself prints — trace_run()
+    executes the user's code, so its output is terminal chatter too."""
+    src = tmp_path / "p.py"
+    src.write_text('total = 2      #: set it\nprint(total)   #: show it\n')
+
+    build(str(src), str(tmp_path / "loud.mp4"), tts="silent")
+    loud = capsys.readouterr().out
+    assert "done." in loud and "2" in loud          # the snippet's own print
+
+    build(str(src), str(tmp_path / "quiet.mp4"), tts="silent", quiet=True)
+    assert capsys.readouterr().out == ""
+    assert (tmp_path / "quiet.mp4").exists()        # ...but it still rendered
+
+
+def test_build_quiet_still_reports_errors(tmp_path, capsys):
+    """--quiet silences progress, never failures: a quiet run that dies must
+    not look like one that succeeded."""
+    src = tmp_path / "plain.py"
+    src.write_text("x = 1\n")                       # no narration at all
+    with pytest.raises(SystemExit) as excinfo:
+        build(str(src), str(tmp_path / "o.mp4"), tts="silent", quiet=True)
+    assert "No narration found" in str(excinfo.value)
+
+
 def test_split_narration_no_slash_is_backward_compatible():
     assert split_narration("Loop n times; the counter itself is unused.") == (
         "", "Loop n times; the counter itself is unused.")
 
 
-def test_split_narration_splits_on_first_slash_only():
-    assert split_narration("write it / explain it / extra") == ("write it", "explain it / extra")
-    assert split_narration(" leading and trailing / narration ") == ("leading and trailing", "narration")
-    assert split_narration("only silent typing /") == ("only silent typing", "")
-    assert split_narration("/ only walkthrough") == ("", "only walkthrough")
+def test_split_narration_splits_on_the_first_double_slash_only():
+    """'//' separates the two PASSES. A single '/' does not — it separates
+    entry from completion within one pass (split_entry)."""
+    assert split_narration("write it // explain it // extra") == (
+        "write it", "explain it // extra")
+    assert split_narration(" leading and trailing // narration ") == (
+        "leading and trailing", "narration")
+    assert split_narration("only silent typing //") == ("only silent typing", "")
+    assert split_narration("// only walkthrough") == ("", "only walkthrough")
+    # a lone '/' stays in the walkthrough half, for split_entry to deal with
+    assert split_narration("entry / completion") == ("", "entry / completion")
+
+
+def test_split_entry_splits_one_pass_into_entry_and_completion():
+    assert split_entry("we arrive / we are done") == ("we arrive", "we are done")
+    assert split_entry("only completion") == ("", "only completion")
+    assert split_entry("/ only completion") == ("", "only completion")
+    assert split_entry("only entry /") == ("only entry", "")
+    assert split_entry(" spaced / out ") == ("spaced", "out")
 
 
 def test_two_pass_beats_pass1_has_no_state_or_highlight():
@@ -537,9 +632,9 @@ def test_unnumbered_walkthrough_inherits_the_writing_passs_order():
     order BOTH passes. It used to order only pass 1, so the video jumped
     around while writing and then marched top-to-bottom while explaining."""
     source = (
-        "def counter(n):       #: 2) sig / whole thing\n"
-        "    total = 0         #: 1) start / total is {total}\n"
-        "    return total      #: 3) ret / return it\n"
+        "def counter(n):       #: 2) sig // whole thing\n"
+        "    total = 0         #: 1) start // total is {total}\n"
+        "    return total      #: 3) ret // return it\n"
     )
     code_lines, markers = parse(source)
     steps = trace_run(source, "<reorder-twopass-test>")
@@ -560,9 +655,9 @@ def test_two_pass_beats_supports_independent_per_pass_order():
     """Numbering pass 2 explicitly still overrides the inheritance above —
     the two passes can genuinely run in different orders."""
     source = (
-        "def counter(n):       #: 2) sig / 3) whole thing\n"
-        "    total = 0         #: 1) start / 1) total is {total}\n"
-        "    return total      #: 3) ret / 2) return it\n"
+        "def counter(n):       #: 2) sig // 3) whole thing\n"
+        "    total = 0         #: 1) start // 1) total is {total}\n"
+        "    return total      #: 3) ret // 2) return it\n"
     )
     code_lines, markers = parse(source)
     steps = trace_run(source, "<reorder-twopass-test>")
@@ -573,8 +668,8 @@ def test_two_pass_beats_supports_independent_per_pass_order():
 
 
 def test_two_pass_order_untouched_when_neither_pass_is_numbered():
-    source = ("x = 1   #: write x / explain x\n"
-              "y = 2   #: write y / explain y\n")
+    source = ("x = 1   #: write x // explain x\n"
+              "y = 2   #: write y // explain y\n")
     code_lines, markers = parse(source)
     beats1, beats2 = _two_pass_beats(code_lines, markers, [])
     assert [b.highlight for b in beats1] == [1, 2]
@@ -584,8 +679,8 @@ def test_two_pass_order_untouched_when_neither_pass_is_numbered():
 def test_two_pass_order_numbered_only_on_the_walkthrough_side():
     """The mirror case: pass 1 unnumbered stays in source order, and the
     inheritance must not fire backwards."""
-    source = ("x = 1   #: write x / 2) explain x\n"
-              "y = 2   #: write y / 1) explain y\n")
+    source = ("x = 1   #: write x // 2) explain x\n"
+              "y = 2   #: write y // 1) explain y\n")
     code_lines, markers = parse(source)
     beats1, beats2 = _two_pass_beats(code_lines, markers, [])
     assert [b.highlight for b in beats1] == [1, 2]
@@ -607,7 +702,7 @@ def test_trace_records_the_parameters_against_the_def_line():
     highlighting `def add_one(n):` showed an empty panel and the arguments
     only appeared once the first body line was highlighted."""
     steps = trace_run(DEF_SNIPPET, "<def>")
-    entries = [st for st in steps if st.call_entry]
+    entries = [st for st in steps if st.kind == "call"]
     assert [st.line_no for st in entries] == [1]
     assert entries[0].disp == {"n": "7", "step": "5"}   # defaults included
 
@@ -630,7 +725,7 @@ def test_call_entry_steps_do_not_reach_every_mode_or_env_before():
     every = build_beats(code_lines, markers, steps, every=True,
                         loop_ranges=loop_body_ranges(DEF_SNIPPET))
     assert [b.state for b in every if b.highlight == 1] == [{}]  # def stays bare
-    assert len(every) == len([st for st in steps if not st.call_entry
+    assert len(every) == len([st for st in steps if st.kind == "done"
                               and st.line_no in {1, 2, 3, 5}])
 
 
@@ -640,7 +735,7 @@ def test_call_entry_steps_skip_frames_with_no_def_line():
     src = ("squares = [i * i for i in range(3)]\n"
            "twice = lambda v: v * 2\n"
            "r = twice(4)\n")
-    assert [st for st in trace_run(src, "<comp>") if st.call_entry] == []
+    assert [st for st in trace_run(src, "<comp>") if st.kind == "call"] == []
 
 
 def test_call_entry_prefers_the_first_call_for_a_recursive_def():
@@ -648,7 +743,7 @@ def test_call_entry_prefers_the_first_call_for_a_recursive_def():
            "    return 1 if k <= 0 else down(k - 1)\n"
            "r = down(3)\n")
     steps = trace_run(src, "<rec>")
-    assert [st.disp["k"] for st in steps if st.call_entry] == ["3", "2", "1", "0"]
+    assert [st.disp["k"] for st in steps if st.kind == "call"] == ["3", "2", "1", "0"]
 
     code_lines, markers = parse("def down(k):   #: define\n"
                                 "    return 1 if k <= 0 else down(k - 1)\n"
@@ -658,6 +753,229 @@ def test_call_entry_prefers_the_first_call_for_a_recursive_def():
                                   "    return 1 if k <= 0 else down(k - 1)\n"
                                   "r = down(3)\n", "<rec>"), every=False)
     assert beats[0].state == {"k": "3"}   # the outermost call, not the deepest
+
+
+EXEC_SNIPPET = """\
+#: An intro at the top.
+def add_one(n):         #: name it
+    x = n + 1           #: add one
+    return x            #: give it back
+
+def never(b):           #: never called
+    return b * 2        #: never runs
+
+#: A comment in the middle.
+result = add_one(7)     #: the call
+"""
+
+
+def _exec_beats_for(src, name="<exec>"):
+    code_lines, markers = parse(src)
+    steps = trace_run(src, name, entries=True)
+    return code_lines, build_beats(code_lines, markers, steps, every=False,
+                                   order=sc.ORDER_EXEC)
+
+
+def test_exec_order_follows_entry_then_completion():
+    """A line is highlighted when Python ARRIVES at it (pre-state) and again
+    when it finishes (post-state) — so `result = add_one(7)` shows no
+    `result` on the way in, the body plays, then it shows `result` on the way
+    out. Only the completion carries the narration."""
+    _, beats = _exec_beats_for(EXEC_SNIPPET)
+    seq = [(b.highlight, bool(b.narration)) for b in beats]
+    # the call line appears twice: silent on entry, narrated on completion
+    assert seq.count((10, False)) == 1 and seq.count((10, True)) == 1
+    assert seq.index((10, False)) < seq.index((10, True))
+
+    entry = next(b for b in beats if b.highlight == 10 and not b.narration)
+    done = next(b for b in beats if b.highlight == 10 and b.narration)
+    assert "result" not in entry.state
+    assert done.state["result"] == "8"
+
+
+def test_exec_order_narrates_only_completions():
+    _, beats = _exec_beats_for(EXEC_SNIPPET)
+    for b in beats:
+        if b.highlight == 2 and b.state.get("n"):     # the "call" visit
+            assert b.narration == ""
+
+
+def test_exec_order_drops_narration_of_lines_that_never_run():
+    """`never()`'s body has a marker but never executes, so it gets no beat."""
+    code_lines, beats = _exec_beats_for(EXEC_SNIPPET)
+    assert not any(b.narration == "never runs" for b in beats)
+    assert 7 not in [b.highlight for b in beats]
+    # ...but the code is on screen throughout, so nothing is left blank.
+    assert all(b.revealed is None for b in beats)
+
+
+def test_exec_order_places_comment_markers_after_the_preceding_code_line():
+    """Top-of-file comments come first; a later one follows the nearest
+    preceding code line that actually got a beat — line 7 never runs, so the
+    middle comment attaches to line 6, not to line 7."""
+    _, beats = _exec_beats_for(EXEC_SNIPPET)
+    assert beats[0].narration == "An intro at the top."
+    idx = next(i for i, b in enumerate(beats)
+               if b.narration == "A comment in the middle.")
+    assert beats[idx - 1].highlight == 6
+
+
+def test_exec_order_collapses_an_instantaneous_line():
+    """A module-level `def` finishes the moment it starts, so its entry and
+    completion frames are identical — one beat, not two silent duplicates."""
+    _, beats = _exec_beats_for("def f():\n    return 1  #: body\nf()  #: call\n")
+    assert [b.highlight for b in beats].count(1) <= 1
+
+
+def test_exec_order_shows_the_whole_snippet_throughout():
+    """Playback jumps around (call site, body, back to the call site), so
+    revealing lines in that order would make the code appear in a scattered,
+    hole-punched sequence. Only the highlight moves — same as --every."""
+    _, beats = _exec_beats_for(EXEC_SNIPPET)
+    assert all(b.revealed is None for b in beats)
+
+
+def test_exec_order_leaves_source_order_untouched():
+    """--order source must produce exactly what it always did, entries or not."""
+    code_lines, markers = parse(EXEC_SNIPPET)
+    plain = build_beats(code_lines, markers, trace_run(EXEC_SNIPPET, "<x>"),
+                        every=False)
+    assert [b.highlight for b in plain] == [None, 2, 3, 4, 6, 7, None, 10]
+
+
+def test_entry_and_completion_narration_in_exec_order():
+    """`entry / completion` gives the two visits different words. The state
+    panel already differed; now the narration can too."""
+    src = ("def add_one(n):   #: name it // step in with n / it is defined\n"
+           "    return n + 1  #: give back // about to add / it returns\n"
+           "\n"
+           "y = add_one(2)    #: call // we call it / it returned {y}\n")
+    code_lines, markers = parse(src)
+    steps = trace_run(src, "<ec>", entries=True)
+    m1 = order_markers(markers, [split_narration(m.text)[0] for m in markers])
+    m2 = order_markers(markers, [split_narration(m.text)[1] for m in markers])
+    beats = build_beats(code_lines, m2, steps, every=False, order=sc.ORDER_EXEC)
+    said = [(b.highlight, b.narration) for b in beats]
+
+    assert (4, "we call it") in said          # entry of the call line
+    assert (4, "it returned 3") in said       # ...and its completion
+    assert said.index((4, "we call it")) < said.index((4, "it returned 3"))
+    assert (2, "about to add") in said and (2, "it returns") in said
+    # pass 1 is untouched by any of this
+    assert [m.text for m in m1] == ["name it", "give back", "call"]
+
+
+def test_entry_narration_keeps_a_beat_that_would_otherwise_collapse():
+    """An instantaneous line is normally emitted once, since its entry and
+    completion frames are identical — but not when the two SAY different
+    things."""
+    # `pass` changes nothing, so its entry and completion panels match — an
+    # assignment would differ and be kept on its own merits.
+    plain = "pass  #: nothing happens\n"
+    split = "pass  #: about to / nothing happens\n"
+    for src, expected in ((plain, 1), (split, 2)):
+        code_lines, markers = parse(src)
+        beats = build_beats(code_lines, markers, trace_run(src, "<c>", entries=True),
+                            every=False, order=sc.ORDER_EXEC)
+        assert len(beats) == expected
+
+
+def test_a_def_lines_entry_narration_belongs_to_the_call():
+    """A `def` line is arrived at twice — defining it, then entering it. The
+    entry words describe stepping in, so they play once, at the call."""
+    src = ("def f(n):      #: step in with n / it is defined\n"
+           "    return n   #: / returns\n"
+           "y = f(1)       #: we call / done\n")
+    code_lines, markers = parse(src)
+    beats = build_beats(code_lines, markers, trace_run(src, "<d>", entries=True),
+                        every=False, order=sc.ORDER_EXEC)
+    said = [(b.highlight, b.narration) for b in beats]
+    assert said.count((1, "step in with n")) == 1
+    assert said.count((1, "it is defined")) == 1
+
+
+def test_entry_narration_is_reported_when_the_order_cannot_show_it(tmp_path, capsys):
+    """The migration signal: the pass separator used to be a single '/', so an
+    old file's `write / explain` now reads as entry/completion and quietly
+    loses its writing pass. Naming it makes that a one-character fix."""
+    src = tmp_path / "s.py"
+    src.write_text("x = 1  #: write it / explain it\n")
+    sc._build_all_beats(str(src), trace=True, every=False)
+    out = capsys.readouterr().out
+    assert "entry narration" in out and "'//'" in out
+
+
+def test_no_entry_warning_when_exec_order_will_use_it(tmp_path, capsys):
+    src = tmp_path / "s.py"
+    src.write_text("x = 1  #: arriving / arrived\n")
+    sc._build_all_beats(str(src), trace=True, every=False, order=sc.ORDER_EXEC)
+    assert "entry narration" not in capsys.readouterr().out
+
+
+def test_exec_order_reports_narration_it_had_to_drop(capsys):
+    """Silently losing half a snippet's commentary reads as a tool bug rather
+    than what it is — an untaken branch, or a snippet that raised part-way."""
+    _, beats = _exec_beats_for(EXEC_SNIPPET)
+    out = capsys.readouterr().out
+    assert "never ran to completion" in out
+    assert "7" in out                      # never()'s body
+
+
+def test_exec_order_says_nothing_when_every_line_runs(capsys):
+    _exec_beats_for("x = 1  #: one\ny = 2  #: two\n")
+    assert "never ran to completion" not in capsys.readouterr().out
+
+
+def test_exec_order_on_a_snippet_that_raises(capsys, tmp_path):
+    """A snippet that blows up part-way still renders what DID run, and the
+    lines it never reached are reported rather than quietly missing."""
+    src = tmp_path / "boom.py"
+    src.write_text("x = 1        #: set x\n"
+                   "raise ValueError('boom')  #: it blows up\n"
+                   "y = 2        #: never reached\n")
+    _, _, beats2, _ = sc._build_all_beats(str(src), trace=True, every=False,
+                                          order=sc.ORDER_EXEC)
+    out = capsys.readouterr().out
+    assert "snippet raised ValueError" in out
+    assert "never ran to completion" in out
+    assert 3 not in [b.highlight for b in beats2]
+    assert beats2[-1].revealed is None      # the code is still shown
+
+
+@pytest.mark.parametrize("kwargs,message", [
+    (dict(trace=False, every=False), "needs execution"),
+    (dict(trace=True, every=True), "no meaning with --every"),
+])
+def test_exec_order_rejects_impossible_combinations(tmp_path, kwargs, message):
+    src = tmp_path / "s.py"
+    src.write_text("x = 1  #: one\n")
+    with pytest.raises(SystemExit) as excinfo:
+        sc._build_all_beats(str(src), order=sc.ORDER_EXEC, **kwargs)
+    assert message in str(excinfo.value)
+
+
+def test_exec_order_rejects_numbered_prefixes(tmp_path):
+    """Two different answers to "what order?" — refuse rather than pick."""
+    src = tmp_path / "s.py"
+    src.write_text("x = 1  #: 2) two\ny = 2  #: 1) one\n")
+    with pytest.raises(SystemExit) as excinfo:
+        sc._build_all_beats(str(src), trace=True, every=False,
+                            order=sc.ORDER_EXEC)
+    assert "two different" in str(excinfo.value)
+
+
+def test_exec_order_applies_to_the_walkthrough_pass_only(tmp_path):
+    """Pass 1 is someone writing the code, which happens top-to-bottom."""
+    src = tmp_path / "s.py"
+    src.write_text("def f(n):        #: name it // it takes n\n"
+                   "    return n + 1 #: return // it returns\n"
+                   "r = f(1)         #: call it // we call it\n")
+    _, beats1, beats2, _ = sc._build_all_beats(str(src), trace=True, every=False,
+                                               order=sc.ORDER_EXEC)
+    assert [b.highlight for b in beats1] == [1, 2, 3]          # source order
+    # the walkthrough visits the call line before the body
+    order2 = [b.highlight for b in beats2]
+    assert order2.index(3) < order2.index(2)
 
 
 def test_build_rejects_order_prefixes_with_every(tmp_path):
@@ -1151,8 +1469,8 @@ def test_build_two_pass_pause_applies_to_both_passes_without_trailing_pause(tmp_
     last beat of the whole video. pause=P adds exactly 3*P s vs. pause=0."""
     src = tmp_path / "two_beats.py"
     src.write_text(
-        "print(1) #: one / one narrated\n"
-        "print(2) #: two / two narrated\n"
+        "print(1) #: one // one narrated\n"
+        "print(2) #: two // two narrated\n"
     )
     out0 = tmp_path / "pause0.mp4"
     out2 = tmp_path / "pause2.mp4"
@@ -1488,16 +1806,16 @@ def test_resolve_footnotes_does_not_renumber_the_walkthrough_pass():
     so silently made the walkthrough pass numbered, so a single footnote in
     an otherwise walkthrough-unnumbered file tripped order_markers()'
     all-or-none check (see the mixing test below)."""
-    src = "x = 2  #: 1)\n\n#: 1) Writing. / Walkthrough.\n"
-    assert resolve_footnotes(src) == "x = 2  #: 1) Writing. / Walkthrough.\n"
+    src = "x = 2  #: 1)\n\n#: 1) Writing. // Walkthrough.\n"
+    assert resolve_footnotes(src) == "x = 2  #: 1) Writing. // Walkthrough.\n"
 
 
 def test_footnote_body_is_appended_to_the_references_own_text_per_pass():
     """The body is pasted at the END of whatever text the first occurrence
     already has, joined per pass so a '/' on either side keeps its meaning."""
-    src = "x = 2  #: 1) Head one. / Head two.\n\n#: 1) Body one. / Body two.\n"
+    src = "x = 2  #: 1) Head one. // Head two.\n\n#: 1) Body one. // Body two.\n"
     assert resolve_footnotes(src) == \
-        "x = 2  #: 1) Head one. Body one. / Head two. Body two.\n"
+        "x = 2  #: 1) Head one. Body one. // Head two. Body two.\n"
 
 
 def test_footnote_mixes_with_single_occurrence_order_prefixes(tmp_path):
@@ -1507,13 +1825,13 @@ def test_footnote_mixes_with_single_occurrence_order_prefixes(tmp_path):
     and every pass-2 text unnumbered — no all-or-none mix in either."""
     src = tmp_path / "mixed.py"
     src.write_text(
-        "#: 0) Intro. / Trace it.\n"
-        "def fib(n):     #: 2) Names it. / Captures n.\n"
-        "    return n    #: 3) / Returns n.\n"
+        "#: 0) Intro. // Trace it.\n"
+        "def fib(n):     #: 2) Names it. // Captures n.\n"
+        "    return n    #: 3) // Returns n.\n"
         "\n"
         "assert fib(7) == 7  #: 1)\n"
         "\n"
-        "#: 1) Always write the test first. / Call it with seven.\n")
+        "#: 1) Always write the test first. // Call it with seven.\n")
     code_lines, markers = parse(resolve_footnotes(src.read_text()))
     passes = [split_narration(m.text) for m in markers]
     assert all(_parse_order(p1)[0] is not None for p1, _ in passes)
@@ -1541,11 +1859,11 @@ def test_footnote_keeps_the_separator_when_pass_one_ends_up_empty():
     walkthrough pass is otherwise unnumbered that trips order_markers()'
     all-or-none check."""
     # The separator on the body block...
-    assert resolve_footnotes("x = 2  #: 1)\n\n#: 1) / Body.\n") == \
-        "x = 2  #: 1) / Body.\n"
+    assert resolve_footnotes("x = 2  #: 1)\n\n#: 1) // Body.\n") == \
+        "x = 2  #: 1) // Body.\n"
     # ...or on the reference itself.
-    assert resolve_footnotes("x = 2  #: 1) /\n\n#: 1) Body.\n") == \
-        "x = 2  #: 1) / Body.\n"
+    assert resolve_footnotes("x = 2  #: 1) //\n\n#: 1) Body.\n") == \
+        "x = 2  #: 1) // Body.\n"
 
 
 def test_footnote_with_empty_pass_one_builds_alongside_unnumbered_walkthroughs(tmp_path):
@@ -1554,10 +1872,10 @@ def test_footnote_with_empty_pass_one_builds_alongside_unnumbered_walkthroughs(t
     from a footnote block instead of inline."""
     src = (
         "def fib(n):      #: 1)\n"
-        "    a, b = 0, 1  #: 2) /\n"
-        "    return a     #: 3) / Hand back a.\n"
+        "    a, b = 0, 1  #: 2) //\n"
+        "    return a     #: 3) // Hand back a.\n"
         "\n"
-        "#: 1) Name it. / It takes n.\n"
+        "#: 1) Name it. // It takes n.\n"
         "\n"
         "#: 2) Start from zero and one.\n"
     )
@@ -1575,8 +1893,8 @@ def test_footnote_with_empty_pass_one_builds_alongside_unnumbered_walkthroughs(t
 def test_footnote_empty_pass_one_matches_the_inline_spelling():
     """A footnote must produce exactly the beats you would get by typing the
     body inline after the 'N)' — that equivalence is the whole design."""
-    inline = "x = 2  #: 1) / Body text.\n"
-    footnoted = "x = 2  #: 1)\n\n#: 1) / Body text.\n"
+    inline = "x = 2  #: 1) // Body text.\n"
+    footnoted = "x = 2  #: 1)\n\n#: 1) // Body text.\n"
     assert resolve_footnotes(footnoted) == inline
 
 
@@ -1588,8 +1906,8 @@ def test_footnote_label_orders_the_pass_it_is_numbered_in():
     src = ("x = 2  #: 2)\n"
            "y = 3  #: 1)\n"
            "\n"
-           "#: 1) First write. / First walk.\n"
-           "#: 2) Second write. / Second walk.\n")
+           "#: 1) First write. // First walk.\n"
+           "#: 2) Second write. // Second walk.\n")
     code_lines, markers = parse(resolve_footnotes(src))
     beats1, beats2 = _two_pass_beats(code_lines, markers, [])
     assert [b.narration for b in beats1] == ["First write.", "Second write."]
@@ -1635,13 +1953,13 @@ def test_resolve_footnotes_leaves_two_code_line_occurrences_alone(capsys):
 def test_single_occurrence_labels_are_untouched_and_silent(capsys):
     """A label used once is the old order prefix and stays exactly that —
     no substitution, and no note, however it's spelled."""
-    src = ("#: 0) A numbered intro line. / And its walkthrough.\n"
+    src = ("#: 0) A numbered intro line. // And its walkthrough.\n"
            "a = 1  #: 1)\n"          # numbered, no narration of its own
            "b = 2  #: 9) Orphan body text.\n"
            "\n"
            "#: 1) One.\n")           # this pairs with line 2 and IS merged
     out = resolve_footnotes(src)
-    assert out.splitlines()[0] == "#: 0) A numbered intro line. / And its walkthrough."
+    assert out.splitlines()[0] == "#: 0) A numbered intro line. // And its walkthrough."
     assert "b = 2  #: 9) Orphan body text." in out
     assert "a = 1  #: 1) One." in out
     assert capsys.readouterr().out == ""
@@ -1816,14 +2134,13 @@ def test_panel_colors_default_to_the_module_constants():
     """Not passing either flag must leave the panel exactly as it looked
     before they existed."""
     assert sc._panel_colors() == sc.PanelColors(
-        bg=sc.PANEL_BG, header=sc.COL_HEADER, name=sc.COL_NAME, value=sc.COL_VALUE)
+        bg=sc.PANEL_BG, name=sc.COL_NAME, value=sc.COL_VALUE)
 
 
 def test_state_bg_color_alone_leaves_the_text_colors_alone():
     colors = sc._panel_colors(state_bg="#0d1117")
     assert colors.bg == "#0d1117"
-    assert (colors.header, colors.name, colors.value) == \
-        (sc.COL_HEADER, sc.COL_NAME, sc.COL_VALUE)
+    assert (colors.name, colors.value) == (sc.COL_NAME, sc.COL_VALUE)
 
 
 def test_state_fg_color_sets_both_names_and_values():
@@ -1832,19 +2149,6 @@ def test_state_fg_color_sets_both_names_and_values():
     colors = sc._panel_colors(state_fg="#9CDCFE")
     assert colors.name == colors.value == "#9CDCFE"
     assert colors.bg == sc.PANEL_BG
-
-
-def test_state_fg_color_dims_the_header_toward_the_background():
-    """The 'STATE' label has to stay quieter than the values it labels, the
-    way the default COL_HEADER/COL_VALUE pair does."""
-    colors = sc._panel_colors(state_bg="#000000", state_fg="#ffffff")
-    assert colors.header == sc._mix("#ffffff", "#000000", sc.HEADER_DIM)
-
-    def lum(c):
-        return sum(int(c.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
-
-    # strictly between background and text, i.e. dimmer than the values
-    assert lum(colors.bg) < lum(colors.header) < lum(colors.value)
 
 
 @pytest.mark.parametrize("fg,bg,t,expected", [
@@ -1901,10 +2205,51 @@ def test_plan_canvas_carries_the_resolved_panel_colors():
 
 @pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
 def test_render_panel_paints_the_requested_background():
-    colors = sc.PanelColors(bg="#0d1117", header="#333333",
-                            name="#9CDCFE", value="#9CDCFE")
+    colors = sc.PanelColors(bg="#0d1117", name="#9CDCFE", value="#9CDCFE")
     img = sc.render_panel({"a": "1"}, 240, 200, colors)
     assert img.getpixel((img.width - 2, img.height - 2)) == (0x0d, 0x11, 0x17)
+
+
+@pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
+@pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
+def test_compose_can_hide_the_panel_while_keeping_the_canvas(tmp_path):
+    """Two-pass mode's writing pass runs with steps=[], so its box is empty on
+    every frame. It can only be HIDDEN, never removed: one canvas size serves
+    the whole video (invariant 1), so the space stays reserved."""
+    from PIL import ImageChops
+
+    beat = Beat(revealed=None, highlight=1, narration="hi", state={"x": "1"})
+    cv = plan_canvas(["x = 1"], [beat], show_panel=True, subtitles=False)
+
+    shown = Image.open(compose(cv, "x = 1", [1], {"x": "1"}, None,
+                               str(tmp_path / "on.png")))
+    hidden = Image.open(compose(cv, "x = 1", [1], {"x": "1"}, None,
+                                str(tmp_path / "off.png"), show_panel=False))
+
+    assert shown.size == hidden.size                    # same canvas
+    assert ImageChops.difference(shown, hidden).getbbox() is not None
+    # the panel's corner is page background once hidden, not PANEL_BG
+    corner = (cv.W - PAD - 4, PAD + 4)
+    assert shown.getpixel(corner) != hidden.getpixel(corner)
+    assert hidden.getpixel(corner) == tuple(
+        int(cv.bg.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def test_panel_and_highlight_share_one_default_colour():
+    """--highlight-color defaults to 'panel', so PANEL_BG sets both surfaces."""
+    assert sc.PANEL_BG == "#DDDEDF"
+    assert sc._resolve_style().highlight_color == sc.PANEL_BG
+    assert sc._panel_colors().bg == sc.PANEL_BG
+
+
+def test_render_panel_with_no_state_is_a_bare_box():
+    """The "(no state)" placeholder is gone: a line that has not executed
+    (a function defined but never called) shows an empty box, not a label."""
+    from PIL import ImageChops
+
+    empty = sc.render_panel({}, 240, 200)
+    flat = Image.new("RGB", (240, 200), sc.PANEL_BG)
+    assert ImageChops.difference(empty, flat).getbbox() is None   # nothing drawn
 
 
 @pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")

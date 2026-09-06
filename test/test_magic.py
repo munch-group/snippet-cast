@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import sys
@@ -94,13 +95,87 @@ def test_cell_magic_export_script_does_not_render(ip, tmp_path, capsys):
 def test_cell_magic_two_pass_narration(ip, tmp_path):
     out = tmp_path / "out.mp4"
     cell = (
-        "def f(n):    #: Writing f now. / f takes one argument, n.\n"
+        "def f(n):    #: Writing f now. // f takes one argument, n.\n"
         "    return n #: /Return n right away.\n"
     )
     result = ip.run_cell(f"%%snippet-cast -o {out} --tts silent\n{cell}")
 
     assert result.success
     assert out.exists()
+
+
+def test_cell_magic_help_prints_options_and_renders_nothing(ip, tmp_path, monkeypatch, capsys):
+    """magic_arguments builds its parser with add_help=False, so without an
+    explicit --help the cell just fails with "unrecognized arguments"."""
+    monkeypatch.chdir(tmp_path)
+    result = ip.run_cell("%%snippet-cast --help\nx = 1  #: one\n")
+
+    out = capsys.readouterr().out
+    assert result.success
+    assert "--order" in out and "--tts" in out and "SNIPPET_CAST_PAUSE" in out
+    assert "%%snippet-cast" in out           # not magic_arguments' %snippet_cast
+    assert not out.lstrip().startswith("::")  # nor its reST literal marker
+    # answering the question is all it does
+    assert not list(tmp_path.glob("**/*.mp4"))
+
+
+@pytest.mark.parametrize("src", [
+    "%%snippet-cast --help",            # nothing at all under it
+    "%%snippet-cast --help\n\n\n",      # only blank lines
+])
+def test_help_works_with_an_empty_cell_body(ip, tmp_path, monkeypatch, capsys, src):
+    """IPython raises on a `%%` cell whose body is empty (`cell == ''` in
+    run_cell_magic) BEFORE any magic runs, so this is fixed in the input
+    transformer stage by rewriting it to the line-magic form."""
+    monkeypatch.chdir(tmp_path)
+    result = ip.run_cell(src)
+
+    assert result.success
+    assert "--order" in capsys.readouterr().out
+
+
+def test_line_magic_form_answers_help(ip, capsys):
+    result = ip.run_cell("%snippet-cast --help")
+    assert result.success
+    assert "--tts" in capsys.readouterr().out
+
+
+def test_line_magic_without_a_cell_says_what_to_do(ip, capsys):
+    result = ip.run_cell("%snippet-cast --tts silent")
+    assert result.success
+    assert "%%snippet-cast" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("lines", [
+    ["%%snippet-cast -q\n", "x = 1  #: one\n"],   # a real snippet
+    ["%%time\n", "x = 1\n"],                      # somebody else's magic
+    ["x = 1\n"],                                  # ordinary code
+    [],                                            # an empty cell
+])
+def test_input_transformer_leaves_every_other_cell_alone(lines):
+    """It runs on EVERY cell in the notebook, so it has to be inert."""
+    assert sc_magic._bodiless_cell_to_line_magic(list(lines)) == lines
+
+
+def test_input_transformer_is_registered_once(ip):
+    """%load_ext can be called again, and autoreload re-imports."""
+    sc_magic.load_ipython_extension(ip)
+    sc_magic.load_ipython_extension(ip)
+    assert sum(1 for t in ip.input_transformers_cleanup
+               if getattr(t, "__name__", "") == "_bodiless_cell_to_line_magic") == 1
+
+
+def test_cell_magic_help_wins_over_other_arguments(ip, tmp_path, monkeypatch, capsys):
+    """It is checked before env resolution and every validation, so it
+    answers whatever else the line says."""
+    monkeypatch.chdir(tmp_path)
+    result = ip.run_cell("%%snippet-cast --help --style no-such-style\nx = 1  #: one\n")
+
+    assert result.success
+    captured = capsys.readouterr()
+    assert "--order" in captured.out
+    assert captured.err == ""            # no unknown-style complaint
+    assert not list(tmp_path.glob("**/*.mp4"))
 
 
 def test_cell_magic_reports_clean_error_on_empty_cell(ip, capsys):
@@ -183,6 +258,298 @@ def test_cell_magic_reports_a_bad_screenflow_value(ip, capsys):
 
     assert result.success  # the magic itself must not raise/crash the cell
     assert "expected WxH" in capsys.readouterr().err
+
+
+def test_cell_magic_quiet_suppresses_output(ip, tmp_path, capsys):
+    out = tmp_path / "q.mp4"
+    cell = 'x = 1  #: one\nprint("snippet output")  #: two\n'
+
+    ip.run_cell(f"%%snippet-cast -o {out} --tts silent\n{cell}")
+    assert "done." in capsys.readouterr().out
+
+    out2 = tmp_path / "q2.mp4"
+    result = ip.run_cell(f"%%snippet-cast -o {out2} --tts silent -q\n{cell}")
+    assert result.success
+    quiet = capsys.readouterr().out
+    # The rendered video is the cell's RESULT and is still displayed (headless,
+    # display() falls back to printing its repr); only the chatter is gone.
+    assert "done." not in quiet
+    assert "beats ->" not in quiet
+    assert "snippet output" not in quiet     # the cell's own print, too
+    assert out2.exists()
+
+
+def test_cell_magic_quiet_rejects_record(ip, capsys):
+    result = ip.run_cell("%%snippet-cast --record -q\nx = 1  #: one\n")
+
+    assert result.success  # the magic itself must not raise/crash the cell
+    assert "--quiet can't be used with --record" in capsys.readouterr().err
+
+
+
+
+
+
+
+
+
+
+def _tag(html):
+    return html[html.index("<video"):html.index(">", html.index("<video")) + 1]
+
+
+def _style(html):
+    return html[html.index("<style>"):html.index("</style>")]
+
+
+def test_controls_are_restyled_by_default(tmp_path):
+    """The gradient scrim always goes — it covers roughly the bottom two-thirds
+    of the frame — so every displayed video now carries the <style> block."""
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"\x00")
+    html = sc_magic._video(str(f), False, False)._repr_html_()
+    assert "::-webkit-media-controls-panel" in _style(html)
+    assert "background-image:none" in _style(html)
+
+
+def test_dark_glyphs_for_a_light_frame_light_glyphs_for_a_dark_one(tmp_path):
+    """`light_controls` selects the glyph colour: inverted (dark) for a light
+    frame, left white for a dark one, where inverting would hide them."""
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"\x00")
+
+    dark_glyphs = sc_magic._video(str(f), False, False, False)._repr_html_()
+    assert "invert(1)" in _style(dark_glyphs)
+    assert f'class="{sc_magic.CONTROLS_CLASSES[False]}"' in _tag(dark_glyphs)
+
+    light_glyphs = sc_magic._video(str(f), False, False, True)._repr_html_()
+    assert "invert" not in _style(light_glyphs)
+    assert f'class="{sc_magic.CONTROLS_CLASSES[True]}"' in _tag(light_glyphs)
+
+
+def test_controls_variants_use_distinct_classes(tmp_path):
+    """A Quarto page can hold a light cell and a dark one. Two <style> blocks
+    on the SAME class would leave the later rule governing both videos."""
+    assert sc_magic.CONTROLS_CLASSES[True] != sc_magic.CONTROLS_CLASSES[False]
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"\x00")
+    page = (sc_magic._video(str(f), False, False, False)._repr_html_()
+            + sc_magic._video(str(f), False, False, True)._repr_html_())
+    assert page.count("::-webkit-media-controls-panel") == 2
+    assert page.count("invert(1)") == 1
+
+
+def test_responsive_still_styles_the_video_element(tmp_path):
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"\x00")
+    assert sc_magic.RESPONSIVE_STYLE not in _tag(
+        sc_magic._video(str(f), False, False)._repr_html_())
+    tag = _tag(sc_magic._video(str(f), False, True)._repr_html_())
+    assert sc_magic.RESPONSIVE_STYLE in tag and "controls" in tag
+
+
+def test_light_controls_auto_detects_from_the_frame_background():
+    """Unset, the right variant comes from the frame's own resolved
+    background — so the shipped light theme and --style monokai both come out
+    right with no flag at all."""
+    auto = sc_magic._light_controls_for
+    assert auto("numpy", None, None, None) is False          # light frame
+    assert auto("monokai", None, None, None) is True         # dark frame
+    assert auto("monokai", "#1F1F1F", None, None) is True
+    assert auto("github-dark", None, None, None) is True
+    # An explicit value always wins over the detection.
+    assert auto("numpy", None, None, True) is True
+    assert auto("monokai", None, None, False) is False
+
+
+def test_light_controls_auto_detection_survives_a_bad_style():
+    """A bad --style is reported by resolve_style_args; picking a glyph colour
+    must not raise a second, confusing error on top of it."""
+    assert sc_magic._light_controls_for("no-such-style", None, None, None) is False
+
+
+def test_cell_magic_passes_light_controls_through(ip, tmp_path, monkeypatch):
+    seen = {}
+    real = sc_magic._video
+
+    def spy(out_path, embed, responsive, light_controls=False):
+        seen["light"] = light_controls
+        return real(out_path, embed, responsive, light_controls)
+
+    monkeypatch.setattr(sc_magic, "_video", spy)
+    cell = "x = 1  #: one\n"
+
+    ip.run_cell(f"%%snippet-cast -o {tmp_path / 'a.mp4'} --tts silent -q\n{cell}")
+    assert seen["light"] is False                       # auto: light theme
+
+    ip.run_cell(f"%%snippet-cast -o {tmp_path / 'b.mp4'} --tts silent -q "
+                f"--style monokai\n{cell}")
+    assert seen["light"] is True                        # auto: dark theme
+
+    ip.run_cell(f"%%snippet-cast -o {tmp_path / 'c.mp4'} --tts silent -q "
+                f"--light-controls\n{cell}")
+    assert seen["light"] is True                        # explicit override
+
+    ip.run_cell(f"%%snippet-cast -o {tmp_path / 'd.mp4'} --tts silent -q "
+                f"--style monokai --no-light-controls\n{cell}")
+    assert seen["light"] is False
+
+    monkeypatch.setenv("SNIPPET_CAST_LIGHT_CONTROLS", "1")
+    ip.run_cell(f"%%snippet-cast -o {tmp_path / 'e.mp4'} --tts silent -q\n{cell}")
+    assert seen["light"] is True
+
+
+def test_strip_directives_removes_whole_quarto_option_lines():
+    """`#|` lines configure Quarto, not the snippet — they must not be typed
+    out, narrated or highlighted. Whole lines go rather than being blanked:
+    a blank row would take up height in every frame (invariant 12)."""
+    assert sc_magic._strip_directives(
+        "#| fig-column: margin\nx = 1  #: one\n") == "x = 1  #: one\n"
+    assert sc_magic._strip_directives(
+        "  #| echo: false\nx = 1  #: one\n") == "x = 1  #: one\n"
+    assert sc_magic._strip_directives(
+        "#| a: 1\n#| b: 2\nx = 1  #: one\n") == "x = 1  #: one\n"
+
+
+def test_strip_directives_leaves_everything_else_alone():
+    """Found via tokenize, not a regex (critical invariant 5): a `#|` inside a
+    string literal is not a comment, and a trailing one is not a whole line."""
+    trailing = "x = 1  #| not a directive\n"
+    assert sc_magic._strip_directives(trailing) == trailing
+
+    in_string = 'sql = """\n#| not a directive\n"""\nx = 1  #: one\n'
+    assert sc_magic._strip_directives(in_string) == in_string
+
+    plain = "x = 1  #: one\n"
+    assert sc_magic._strip_directives(plain) is plain   # untouched, not rebuilt
+
+
+def test_cell_magic_drops_directives_before_rendering(ip, tmp_path, monkeypatch):
+    """End to end: the directive must not become a beat or a code row."""
+    monkeypatch.chdir(tmp_path)
+    seen = {}
+    real = sc_magic.build
+
+    def spy(source_path, *a, **kw):
+        seen["source"] = open(source_path).read()
+        return real(source_path, *a, **kw)
+
+    monkeypatch.setattr(sc_magic, "build", spy)
+    ip.run_cell("%%snippet-cast --tts silent -q\n"
+                "#| fig-column: margin\n"
+                "x = 1  #: one\n")
+
+    assert seen["source"] == "x = 1  #: one\n"
+
+
+def test_cell_output_path_is_unique_per_cell_and_stable_across_reruns(tmp_path, monkeypatch):
+    """Every cell used to default to out.mp4, so in a notebook of N cells the
+    first N-1 videos were silently overwritten by the last. Hashing the cell
+    fixes that — and, unlike a random name, re-running an unchanged cell
+    reuses its file instead of leaving another orphan behind."""
+    monkeypatch.chdir(tmp_path)
+    a = sc_magic._cell_output_path("--tts silent", "x = 1  #: one\n")
+    a_again = sc_magic._cell_output_path("--tts silent", "x = 1  #: one\n")
+    b = sc_magic._cell_output_path("--tts silent", "y = 2  #: two\n")
+    c = sc_magic._cell_output_path("--tts silent --typing", "x = 1  #: one\n")
+
+    assert a == a_again          # same cell -> same file, no accumulation
+    assert a != b                # different body -> different file
+    assert a != c                # different flags -> different file too
+    assert os.path.dirname(a) == sc_magic.CACHE_DIR
+
+
+def test_cell_output_dir_ignores_itself_in_git(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sc_magic._cell_output_path("", "x = 1  #: one\n")
+    assert (tmp_path / sc_magic.CACHE_DIR / ".gitignore").read_text().strip() == "*"
+
+
+def test_cell_magic_writes_into_the_cache_dir_by_default(ip, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    ip.run_cell("%%snippet-cast --tts silent -q\nx = 1  #: one\n")
+
+    made = list((tmp_path / sc_magic.CACHE_DIR).glob("*.mp4"))
+    assert len(made) == 1
+    # ...and nothing was dropped in the student's own folder.
+    assert not list(tmp_path.glob("*.mp4"))
+
+
+@pytest.mark.parametrize("flag", ["-o mine.mp4", "-n mine", "-d subdir"])
+def test_explicit_output_still_bypasses_the_cache_dir(ip, tmp_path, monkeypatch, flag):
+    monkeypatch.chdir(tmp_path)
+    ip.run_cell(f"%%snippet-cast --tts silent -q {flag}\nx = 1  #: one\n")
+
+    assert list(tmp_path.glob("**/*.mp4"))                 # something was written
+    assert not (tmp_path / sc_magic.CACHE_DIR).exists()    # but not in the cache
+
+
+def test_env_vars_set_to_their_defaults_express_no_preference(ip, tmp_path, monkeypatch):
+    """A project-wide activation env (pixi's [tool.pixi.activation.env], a
+    shell profile) may materialise EVERY SNIPPET_CAST_* var at its default.
+    That must behave exactly like setting none of them — it broke three ways
+    at once: --manual-audio-dir errored out and rendered nothing, NAME/
+    OUTPUT_DIR put every cell back to overwriting one out.mp4, and SCREENFLOW
+    was a hard error because 'none' had no meaning."""
+    monkeypatch.chdir(tmp_path)
+    for k, v in (("SNIPPET_CAST_MANUAL_AUDIO_DIR", "./manual_audio"),
+                 ("SNIPPET_CAST_NAME", "out"),
+                 ("SNIPPET_CAST_OUTPUT_DIR", "."),
+                 ("SNIPPET_CAST_SCREENFLOW", "none"),
+                 ("SNIPPET_CAST_LIGHT_CONTROLS", "auto"),
+                 ("SNIPPET_CAST_TTS", "silent")):
+        monkeypatch.setenv(k, v)
+
+    result = ip.run_cell("%%snippet-cast -q\nx = 1  #: one\n")
+
+    assert result.success
+    assert len(list((tmp_path / sc_magic.CACHE_DIR).glob("*.mp4"))) == 1
+    assert not list(tmp_path.glob("*.mp4"))     # not back to out.mp4
+
+
+def test_light_controls_env_var_accepts_auto(monkeypatch):
+    """So the variable can sit in an activation env without forcing a choice."""
+    for value in ("auto", "AUTO", ""):
+        monkeypatch.setenv("SNIPPET_CAST_LIGHT_CONTROLS", value)
+        assert sc_magic._light_controls_for("numpy", None, None, None) is False
+        assert sc_magic._light_controls_for("monokai", None, None, None) is True
+
+
+def test_output_env_vars_also_count_as_explicit(ip, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNIPPET_CAST_NAME", "fromenv")   # differs from "out"
+    ip.run_cell("%%snippet-cast --tts silent -q\nx = 1  #: one\n")
+
+    assert (tmp_path / "fromenv.mp4").exists()
+    assert not (tmp_path / sc_magic.CACHE_DIR).exists()
+
+
+def test_cell_magic_is_responsive_by_default(ip, tmp_path, monkeypatch):
+    """The frame is sized to the snippet, so a wide line makes a wide video
+    that overflows a Quarto column. Capping it never scales a small video UP,
+    so it is only ever an improvement — hence on by default."""
+    seen = {}
+    real = sc_magic._video
+
+    def spy(out_path, embed, responsive, light_controls=False):
+        seen["responsive"] = responsive
+        return real(out_path, embed, responsive, light_controls)
+
+    monkeypatch.setattr(sc_magic, "_video", spy)
+    cell = "x = 1  #: one\n"
+
+    ip.run_cell(f"%%snippet-cast -o {tmp_path / 'a.mp4'} --tts silent -q\n{cell}")
+    assert seen["responsive"] is True
+
+    ip.run_cell(f"%%snippet-cast -o {tmp_path / 'b.mp4'} --tts silent -q --no-responsive\n{cell}")
+    assert seen["responsive"] is False
+
+    # The env var can turn it off too, and --responsive overrides that back on.
+    monkeypatch.setenv("SNIPPET_CAST_RESPONSIVE", "0")
+    ip.run_cell(f"%%snippet-cast -o {tmp_path / 'c.mp4'} --tts silent -q\n{cell}")
+    assert seen["responsive"] is False
+    ip.run_cell(f"%%snippet-cast -o {tmp_path / 'd.mp4'} --tts silent -q --responsive\n{cell}")
+    assert seen["responsive"] is True
 
 
 def test_cell_magic_record_rejects_conflicting_tts(ip, capsys):
@@ -418,7 +785,9 @@ def test_cell_magic_record_output_goes_through_live_view_not_real_stdout(ip, tmp
     html_objs = [o for o in rendered if isinstance(o, sc_magic.HTML)]
     assert len(html_objs) >= 2  # at least one create + one update
     assert "some narration" in html_objs[0].data
-    assert "recording — press Enter to stop." in html_objs[-1].data
+    # `any`, not `[-1]`: the finished video is itself an HTML object now (the
+    # control-bar restyling needs a <style> block), so it lands last.
+    assert any("recording — press Enter to stop." in o.data for o in html_objs)
     assert "\\n" not in html_objs[-1].data  # real newline, not an escaped one
 
 
