@@ -222,7 +222,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </header>
 
 
-<div id="95ef1271" class="cell" data-execution_count="2">
+<div id="95ef1271" class="cell" data-execution_count="1">
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> os</span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> snippet_cast</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
@@ -240,7 +240,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
                     [--export-script | --no-export-script]
                     [--record | --no-record] [--responsive | --no-responsive]
                     [--light-controls | --no-light-controls] [-h]
-                    [--order {source,exec}] [-q | --quiet | --no-quiet]
+                    [--order {source,exec}] [-q | --quiet | --no-quiet] [-v]
                     [--no-frame] [--embed]
 
 Render `cell` (an annotated Python snippet) into a screencast and
@@ -267,11 +267,11 @@ options:
                         given (created if missing) [default: current
                         directory; env: SNIPPET_CAST_OUTPUT_DIR]
   --tts &lt;{say,silent,piper,elevenlabs,manual}&gt;
-                        TTS backend [default: silent here — always works, no
-                        setup; see SETUP.md for piper/elevenlabs; env:
-                        SNIPPET_CAST_TTS] (--record implies manual; passing
-                        --tts explicitly as anything else together with
-                        --record is an error)
+                        TTS backend [default: say — macOS only, so pass --tts
+                        silent (a no-setup timing stand-in) elsewhere; see
+                        SETUP.md for piper/elevenlabs; env: SNIPPET_CAST_TTS]
+                        (--record implies manual; passing --tts explicitly as
+                        anything else together with --record is an error)
   --no-trace            don't execute the snippet; skip the state panel [env:
                         SNIPPET_CAST_NO_TRACE]
   --every, --no-every   one beat per execution of a line (animates loops)
@@ -350,12 +350,20 @@ options:
                         bottom, or the 'N) ' order the cell gives) or 'exec'
                         (the order Python visits them — each line highlighted
                         on entry with its pre-state, then again on completion,
-                        where the narration plays) [default: source; env:
-                        SNIPPET_CAST_ORDER]
+                        where the narration plays). Left at the default,
+                        'exec' steps aside for a cell it can't serve (--no-
+                        trace, --every, 'N) ' numbering, an unnarrated --pause
+                        render); passing it explicitly makes those an error
+                        [default: exec; env: SNIPPET_CAST_ORDER]
   -q, --quiet, --no-quiet
-                        suppress progress, notes and the cell's own output;
-                        errors still print, and --export-script still returns
-                        its script [env: SNIPPET_CAST_QUIET]
+                        suppress progress and the cell's own output. ON BY
+                        DEFAULT — use -v/--verbose (or --no-quiet) for the
+                        running commentary. Notes, warnings and errors still
+                        print either way, and --export-script still returns
+                        its script [default: on; env: SNIPPET_CAST_QUIET]
+  -v, --verbose         print the per-beat progress commentary — the inverse
+                        of -q/--quiet, which is on by default. Wins over -q if
+                        both are given [env: SNIPPET_CAST_VERBOSE]
   --no-frame            with --record, don't pop each beat's rendered frame in
                         the system image viewer [env: SNIPPET_CAST_NO_FRAME]
   --embed               embed the video as base64 in the notebook instead of
@@ -391,7 +399,7 @@ done.</code></pre>
 <p>narration entry narration / completion narration</p>
 <p>Allowed formats with two-pass mode:</p>
 <p>first-pass narration // second-pass narration first-pass narration // second-pass entry narration / second-pass completion narration</p>
-<div id="47817b3e" class="cell" data-execution_count="9">
+<div id="47817b3e" class="cell" data-execution_count="4">
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb6"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>snippet<span class="op">-</span>cast</span>
 <span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>                 <span class="co">#: 0) blah blah</span></span>
 <span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> add_one(n):  <span class="co">#: 2) blah blah</span></span>
@@ -421,7 +429,7 @@ done.</code></pre>
     </video>
 </div>
 </div>
-<div id="aff7a46b" class="cell" data-execution_count="10">
+<div id="aff7a46b" class="cell" data-execution_count="5">
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb8"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>snippet<span class="op">-</span>cast <span class="op">--</span>order <span class="bu">exec</span></span>
 <span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>                  <span class="co">#: blah blah</span></span>
 <span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> add_one(n):   <span class="co">#: blah blah</span></span>
@@ -458,49 +466,24 @@ done.</code></pre>
     </video>
 </div>
 </div>
-<div id="274703d2" class="cell" data-execution_count="7">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb10"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>snippet<span class="op">-</span>cast <span class="op">--</span>tts say <span class="op">--</span>order <span class="bu">exec</span> <span class="op">--</span>highlight<span class="op">-</span>color <span class="co">#DDDEDF --state-bg-color #DDDEDF </span></span>
-<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>                  <span class="co">#: Lets write some code // Now lets trace it as it runs</span></span>
-<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> add_one(n):   <span class="co">#: We define the a function // n now points to the value {x} passed to the function / defining the add_one function assigns a name to the code block indented below it.</span></span>
-<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> n <span class="op">&lt;</span> <span class="dv">4</span>:     <span class="co">#: We add control flow to make the value assigned to "x" conditional on the value of "n" // evaluate the resulting value as True or False.</span></span>
-<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>        x <span class="op">=</span> n <span class="op">+</span> <span class="dv">1</span> <span class="co">#: If "n" is smaller than 4, we add one to the value of "n" before assigning it to "x" // the expression on the right side of the equals sign is evaluated and x now points to the resulting value {x} </span></span>
+<div id="274703d2" class="cell" data-execution_count="4">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb10"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="op">%%</span>snippet<span class="op">-</span>cast <span class="op">-</span>q</span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>                                                                                        <span class="co">#: Lets write some code // Now lets trace it as it runs</span></span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> add_one(n):                                                                         <span class="co">#: We define the a function // n now points to the value {x} passed to the function / defining the add_one function assigns a name to the code block indented below it.</span></span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> n <span class="op">&lt;</span> <span class="dv">4</span>:                                                                           <span class="co">#: We add control flow to make the value assigned to "x" conditional on the value of "n" // evaluate the resulting value as True or False.</span></span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>        x <span class="op">=</span> n <span class="op">+</span> <span class="dv">1</span>                                                                       <span class="co">#: If "n" is smaller than 4, we add one to the value of "n" before assigning it to "x" // the expression on the right side of the equals sign is evaluated and x now points to the resulting value {x} </span></span>
 <span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a>    <span class="cf">else</span>:</span>
-<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a>        x <span class="op">=</span> n     <span class="co">#: Otherwise, we we just assign the value of "n" to "x" // the expression on the right side of the equals sign is evaluated and x now points to the resulting value {x}   </span></span>
-<span id="cb10-8"><a href="#cb10-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> x      <span class="co">#: Finally we return the value of "x" // the expression in the return statement is evaluated and the resulting value, {x}, is returned.</span></span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a>        x <span class="op">=</span> n                                                                           <span class="co">#: Otherwise, we we just assign the value of "n" to "x" // the expression on the right side of the equals sign is evaluated and x now points to the resulting value {x}   </span></span>
+<span id="cb10-8"><a href="#cb10-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> x                                                                            <span class="co">#: Finally we return the value of "x" // the expression in the return statement is evaluated and the resulting value, {x}, is returned.</span></span>
 <span id="cb10-9"><a href="#cb10-9" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb10-10"><a href="#cb10-10" aria-hidden="true" tabindex="-1"></a>x <span class="op">=</span> <span class="dv">2</span>             <span class="co">#: Define "x" as the value // evaluating expression on the right and point x to the resulting value {x}</span></span>
-<span id="cb10-11"><a href="#cb10-11" aria-hidden="true" tabindex="-1"></a>y <span class="op">=</span> add_one(x)    <span class="co">#: Define "y" as the value returned by add_one // evaluating expression on the right calls the add_one function / y now points to the value {y} returned by add_one.</span></span>
-<span id="cb10-12"><a href="#cb10-12" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(y)          <span class="co">#: Print the value of "y" // substituting y for its value / print the resulting value {y}.</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>3
-note: --order exec has no beat for 1 narrated line(s) that never ran to completion (6) — an untaken branch, or the snippet stopped early. Their code is still shown; only the narration is dropped.
-22 beats (9 pass-1 + 13 pass-2) -&gt; .snippet-cast/1da0c9ea6a56.mp4  (backend: say, trace: on, two-pass)
-  [pass1 1/9] Lets write some code
-  [pass1 2/9] We define the a function
-  [pass1 3/9] We add control flow to make the value assigned to "x" condit
-  [pass1 4/9] If "n" is smaller than 4, we add one to the value of "n" bef
-  [pass1 5/9] Otherwise, we we just assign the value of "n" to "x"
-  [pass1 6/9] Finally we return the value of "x"
-  [pass1 7/9] Define "x" as the value
-  [pass1 8/9] Define "y" as the value returned by add_one
-  [pass1 9/9] Print the value of "y"
-  [pass2 1/13] Now lets trace it as it runs
-  [pass2 2/13] defining the add_one function assigns a name to the code blo
-  [pass2 3/13] (silent)
-  [pass2 4/13] evaluating expression on the right and point x to the result
-  [pass2 5/13] evaluating expression on the right calls the add_one functio
-  [pass2 6/13] n now points to the value {x} passed to the function
-  [pass2 7/13] evaluate the resulting value as True or False.
-  [pass2 8/13] (silent)
-  [pass2 9/13] the expression on the right side of the equals sign is evalu
-  [pass2 10/13] the expression in the return statement is evaluated and the 
-  [pass2 11/13] y now points to the value 3 returned by add_one.
-  [pass2 12/13] substituting y for its value
-  [pass2 13/13] print the resulting value 3.
-done.</code></pre>
+<span id="cb10-10"><a href="#cb10-10" aria-hidden="true" tabindex="-1"></a>x <span class="op">=</span> <span class="dv">2</span>                                                                                   <span class="co">#: Define "x" as the value // evaluating expression on the right and point x to the resulting value {x}</span></span>
+<span id="cb10-11"><a href="#cb10-11" aria-hidden="true" tabindex="-1"></a>y <span class="op">=</span> add_one(x)                                                                          <span class="co">#: Define "y" as the value returned by add_one // evaluating expression on the right calls the add_one function / y now points to the value {y} returned by add_one.</span></span>
+<span id="cb10-12"><a href="#cb10-12" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(y)                                                                                <span class="co">#: Print the value of "y" // substituting y for its value / print the resulting value {y}.</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-stderr">
+<pre><code>note: --order exec has no beat for 1 narrated line(s) that never ran to completion (6) — an untaken branch, or the snippet stopped early. Their code is still shown; only the narration is dropped.</code></pre>
 </div>
 <div class="cell-output cell-output-display">
-<style>.snippet-cast-controls-dark::-webkit-media-controls-panel{background-image:none!important;filter:invert(1);}</style><video src=".snippet-cast/1da0c9ea6a56.mp4" controls="" class="snippet-cast-controls-dark" style="max-width:100%;height:auto">
+<style>.snippet-cast-controls-dark::-webkit-media-controls-panel{background-image:none!important;filter:invert(1);}</style><video src=".snippet-cast/990541a268b5.mp4" controls="" class="snippet-cast-controls-dark" style="max-width:100%;height:auto">
       Your browser does not support the <code>video</code> element.
     </video>
 </div>
