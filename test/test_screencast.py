@@ -463,15 +463,47 @@ def test_quieted_restores_the_flag_after_an_exception():
     assert sc._QUIET is False
 
 
+def test_warn_goes_to_stderr_and_survives_quiet(capsys):
+    """--quiet is the shipped default for both front ends, and it covers every
+    'note:' too — only a genuine failure gets the separate _warn() channel."""
+    with sc._quieted(True):
+        sc._say("chatter")
+        sc._say("note: advice about the render")
+        sc._warn("  ! the snippet raised")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""                       # chatter AND notes are gone
+    assert "the snippet raised" in captured.err     # the failure is not
+
+
+def test_a_quiet_trace_failure_reports_but_its_note_does_not(tmp_path, capsys):
+    """The two channels on one real run: the snippet blew up (a '!', always
+    shown) and that cost some narration (a 'note:', chatter)."""
+    src = tmp_path / "boom.py"
+    src.write_text("x = 1                     #: set x\n"
+                   "raise ValueError('boom')  #: it blows up\n"
+                   "y = 2                     #: never reached\n")
+
+    with sc._quieted(True):
+        sc._build_all_beats(str(src), trace=True, every=False)
+
+    captured = capsys.readouterr()
+    assert "snippet raised ValueError" in captured.err
+    assert captured.out == ""                       # including the note:
+
+
 def test_export_script_quiet_drops_warnings_but_keeps_the_script(tmp_path, capsys):
     src = tmp_path / "bad.py"
     src.write_text("x = 1  #: one\nfor i in\n")      # deliberate syntax error
 
     noisy = export_script(str(src))
-    assert "cannot trace" in capsys.readouterr().out
+    assert "cannot trace" in capsys.readouterr().err   # a warning: stderr
 
     quiet = export_script(str(src), quiet=True)
-    assert capsys.readouterr().out == ""
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    # ...but --quiet never silences a warning; only the chatter goes.
+    assert "cannot trace" in captured.err
     assert quiet == noisy               # the script itself is the RESULT
 
 
@@ -556,7 +588,9 @@ def test_format_script_dedups_and_marks_silent_beats():
 
 
 def test_export_script_matches_two_pass_beat_count():
-    lines = export_script(str(TWOPASS))
+    # Pinned to source order: the point is one beat per marker per pass, which
+    # the shipped ORDER_EXEC default deliberately multiplies (entry + done).
+    lines = export_script(str(TWOPASS), order=sc.ORDER_SOURCE)
     tagged = [l for l in lines if "[pass 1," in l or "[pass 2," in l]
     assert len(tagged) == 14  # 7 markers x 2 passes
     assert sum(1 for l in tagged if "[pass 1," in l) == 7
@@ -900,7 +934,8 @@ def test_entry_narration_is_reported_when_the_order_cannot_show_it(tmp_path, cap
     loses its writing pass. Naming it makes that a one-character fix."""
     src = tmp_path / "s.py"
     src.write_text("x = 1  #: write it / explain it\n")
-    sc._build_all_beats(str(src), trace=True, every=False)
+    sc._build_all_beats(str(src), trace=True, every=False,
+                        order=sc.ORDER_SOURCE)
     out = capsys.readouterr().out
     assert "entry narration" in out and "'//'" in out
 
@@ -1009,9 +1044,11 @@ def test_exec_order_on_a_snippet_that_raises(capsys, tmp_path):
                    "y = 2        #: never reached\n")
     _, _, beats2, _ = sc._build_all_beats(str(src), trace=True, every=False,
                                           order=sc.ORDER_EXEC)
-    out = capsys.readouterr().out
-    assert "snippet raised ValueError" in out
-    assert "never ran to completion" in out
+    captured = capsys.readouterr()
+    # The failure is a "!" line (stderr, never silenced); the narration it had
+    # to drop is a "note:" (stdout, chatter).
+    assert "snippet raised ValueError" in captured.err
+    assert "never ran to completion" in captured.out
     assert 3 not in [b.highlight for b in beats2]
     assert beats2[-1].revealed is None      # the code is still shown
 
@@ -1036,6 +1073,62 @@ def test_exec_order_rejects_numbered_prefixes(tmp_path):
         sc._build_all_beats(str(src), trace=True, every=False,
                             order=sc.ORDER_EXEC)
     assert "two different" in str(excinfo.value)
+
+
+def test_exec_is_the_shipped_default_order(tmp_path):
+    """ORDER (exec) is what a caller that says nothing gets: a line is visited
+    on the way in and again on the way out, so a plain build has more beats
+    than the file has markers, and the call is narrated before the body."""
+    src = tmp_path / "s.py"
+    src.write_text("def f(n):        #: name it\n"
+                   "    return n + 1 #: return\n"
+                   "r = f(1)         #: call it\n")
+    _, _, default, _ = sc._build_all_beats(str(src), trace=True, every=False)
+    _, _, in_source, _ = sc._build_all_beats(str(src), trace=True, every=False,
+                                             order=sc.ORDER_SOURCE)
+
+    assert sc.ORDER == sc.ORDER_EXEC
+    assert len(in_source) == 3                     # one beat per marker
+    assert len(default) > len(in_source)
+    played = [b.highlight for b in default]
+    assert played.index(3) < played.index(2)       # the call, then the body
+
+
+@pytest.mark.parametrize("source,kwargs", [
+    ("x = 1  #: one\n", dict(trace=False, every=False)),
+    ("for i in range(2):  #: loop\n    pass\n", dict(trace=True, every=True)),
+    ("x = 1  #: 2) two\ny = 2  #: 1) one\n", dict(trace=True, every=False)),
+])
+def test_default_order_steps_aside_instead_of_refusing(tmp_path, source, kwargs):
+    """Each of these is a hard error when --order exec is TYPED. Left at the
+    default it must simply fall back to source order — otherwise shipping exec
+    as the default would stop --no-trace, --every and every 'N) '-numbered
+    file from rendering at all."""
+    src = tmp_path / "s.py"
+    src.write_text(source)
+
+    _, _, beats, _ = sc._build_all_beats(str(src), **kwargs)   # no SystemExit
+    assert beats
+
+    with pytest.raises(SystemExit):
+        sc._build_all_beats(str(src), order=sc.ORDER_EXEC, **kwargs)
+
+
+def test_default_order_steps_aside_for_an_unnarrated_pause_render(tmp_path):
+    """--pause's silent render is one PROGRESSIVELY REVEALED frame per line;
+    exec order shows the whole snippet from frame one, which would erase it."""
+    src = tmp_path / "plain.py"
+    src.write_text("x = 1\ny = x + 1\n")
+
+    _, _, beats, unnarrated = sc._build_all_beats(
+        str(src), trace=True, every=False, allow_unnarrated=True)
+    assert unnarrated
+    assert all(b.revealed is not None for b in beats)   # the reveal survives
+
+    with pytest.raises(SystemExit) as excinfo:
+        sc._build_all_beats(str(src), trace=True, every=False,
+                            allow_unnarrated=True, order=sc.ORDER_EXEC)
+    assert "progressive reveal" in str(excinfo.value)
 
 
 def test_exec_order_applies_to_the_walkthrough_pass_only(tmp_path):
@@ -1166,7 +1259,7 @@ def test_record_narration_calls_custom_frame_fn(tmp_path, monkeypatch):
 
     ok = sc.record_narration(
         str(FIB), str(audio_dir), str(tmp_path / "out.mp4"),
-        show_frame=True, build_after=False,
+        show_frame=True, build_after=False, order=sc.ORDER_SOURCE,
         input_fn=responses, record_fn=lambda *a, **k: True, play_fn=lambda p: None,
         frame_fn=fake_frame_fn)
 
@@ -1403,6 +1496,44 @@ def test_resolve_env_defaults_leaves_explicit_values_alone(monkeypatch):
     args = Args()
     resolve_env_defaults(args, pause=0.0)
     assert args.pause == 0.5  # explicit value wins over the env var
+
+
+def test_main_is_quiet_by_default_and_verbose_turns_it_back_on(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(sc, "build", lambda *a, **kw: seen.update(kw))
+    argv = ["snippet-cast", str(FIB), "-o", str(tmp_path / "o.mp4")]
+
+    monkeypatch.setattr(sys, "argv", argv)
+    sc.main()
+    assert seen["quiet"] is True and sc._QUIET is True
+    # The None sentinel, not ORDER itself — that is what lets exec step aside.
+    assert seen["order"] is None
+
+    monkeypatch.setattr(sys, "argv", argv + ["-v"])
+    sc.main()
+    assert seen["quiet"] is False and sc._QUIET is False
+
+
+def test_main_record_is_not_refused_by_the_quiet_default(tmp_path, monkeypatch):
+    """Recording is an interactive session whose prompts ARE its output. Now
+    that --quiet is the default, only an EXPLICIT -q may refuse it — otherwise
+    every --record run would exit before recording anything."""
+    def fake_record_narration(source_path, manual_audio_dir, out_path, **kw):
+        Path(out_path).write_bytes(b"fake-mp4")
+        return True
+
+    monkeypatch.setattr(sc, "record_narration", fake_record_narration)
+    argv = ["snippet-cast", str(FIB), "-o", str(tmp_path / "o.mp4"),
+            "--record", "--no-frame"]
+
+    monkeypatch.setattr(sys, "argv", argv)
+    sc.main()
+    assert sc._QUIET is False          # the default stepped aside
+
+    monkeypatch.setattr(sys, "argv", argv + ["-q"])
+    with pytest.raises(SystemExit) as excinfo:
+        sc.main()
+    assert "--quiet can't be used with --record" in str(excinfo.value)
 
 
 def test_main_record_rejects_conflicting_tts(monkeypatch):

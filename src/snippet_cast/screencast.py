@@ -317,18 +317,44 @@ AUDIO_AC = "2"
 MANUAL_AUDIO_EXTS = (".wav", ".mp3", ".m4a", ".aiff", ".flac", ".ogg")  # --tts manual / --record
 
 # ---------------------------------------------------------------------------
-# Progress output. Everything informational the tool prints goes through
-# _say() so -q/--quiet can silence it in one place. Errors deliberately do
-# NOT: they go out via sys.exit()/stderr, which --quiet leaves alone, so a
-# quiet run that fails still says why instead of looking like a success.
+# Terminal output, on two channels, because --quiet is the DEFAULT for both
+# front ends (-v/--verbose turns the chatter back on):
+#
+#   _say()   progress, per-beat chatter and every "note: ..." -> stdout,
+#            silenced under --quiet.
+#   _warn()  the "! ..." lines, where something actually went wrong while
+#            running the snippet -> stderr, NEVER silenced.
+#
+# The line between them is FAILURE vs. ADVICE, not severity of wording. A
+# "note:" says the render came out differently than a flag suggested (a flag
+# with no effect in this combination, narration the chosen order can't show,
+# a footnote label left alone) — the video is still exactly what the input
+# asked for, so it is chatter and -v is where it belongs. A "!" says the
+# snippet could not be compiled or raised part-way, so the panels are
+# genuinely incomplete; that must not be silenced.
+#
+# Errors are a third channel and were already handled: sys.exit()/stderr,
+# which --quiet has never touched. _warn() joins them there rather than on
+# stdout so both stay out of `--export-script -q > script.txt`, whose stdout
+# IS the script.
 # ---------------------------------------------------------------------------
 _QUIET = False
 
 
 def _say(*args, **kwargs):
-    """print() for progress, notes and warnings — silenced under --quiet."""
+    """print() for progress chatter and "note: ..." advice — silenced under
+    --quiet, so both need -v/--verbose."""
     if not _QUIET:
         print(*args, **kwargs)
+
+
+def _warn(*args, **kwargs):
+    """print() for the "! ..." lines — stderr, and never silenced. Reserved
+    for the snippet failing to compile or raising part-way, i.e. the cases
+    where the state panels are incomplete through no fault of the input.
+    Advice about the render itself is a "note:" and goes through _say()."""
+    kwargs.setdefault("file", sys.stderr)
+    print(*args, **kwargs)
 
 
 @contextlib.contextmanager
@@ -642,7 +668,7 @@ def trace_run(source, filename, entries=False):
     try:
         code = compile(source, filename, "exec")
     except SyntaxError as e:
-        _say(f"  ! cannot trace (syntax error: {e}); panels will be empty.")
+        _warn(f"  ! cannot trace (syntax error: {e}); panels will be empty.")
         return []
     steps = []
     pending = {}   # id(frame) -> lineno awaiting its post-state snapshot
@@ -701,8 +727,8 @@ def trace_run(source, filename, entries=False):
         with _quiet_stdout():      # the snippet's own print()s, under --quiet
             exec(code, glb)
     except Exception as e:
-        _say(f"  ! snippet raised {type(e).__name__}: {e} "
-             f"(state captured up to that point)")
+        _warn(f"  ! snippet raised {type(e).__name__}: {e} "
+              f"(state captured up to that point)")
     finally:
         sys.settrace(None)
     return steps
@@ -1127,6 +1153,14 @@ def _warn_unused_entry_narration(markers, order):
 
 ORDER_SOURCE = "source"   # --order: markers in source order (or N) order)
 ORDER_EXEC = "exec"       # --order: markers in the order Python visits them
+ORDER = ORDER_EXEC        # the SHIPPED default, used wherever `order` is left
+                          # at None (both front ends, build(), export_script(),
+                          # record_narration()). Because it is a default rather
+                          # than a request, _build_all_beats() lets it STEP
+                          # ASIDE for a run it cannot serve (--no-trace,
+                          # --every, an 'N) '-numbered file, an unnarrated
+                          # --pause render) instead of refusing to render;
+                          # only an explicit --order exec still errors there.
 
 
 def _exec_beats(code_lines, markers, steps):
@@ -2515,7 +2549,7 @@ def _render_two_pass(code_lines, beats1, beats2, cv, work, synth, audio_cache,
 
 
 def _build_all_beats(source_path, trace, every, allow_unnarrated=False,
-                     order=ORDER_SOURCE):
+                     order=None):
     """Shared parse -> two-pass-detect -> validate -> trace -> beats
     preamble used by build(), export_script(), and record_narration().
     Returns (code_lines, beats1, beats2, unnarrated): beats1 is the two-pass
@@ -2530,7 +2564,13 @@ def _build_all_beats(source_path, trace, every, allow_unnarrated=False,
     each frame for `pause` seconds instead of synthesizing anything. Only
     build() opts in (on an explicit --pause) — --export-script and --record
     exist to produce/record narration, so a file with none is still an error
-    there."""
+    there.
+
+    `order=None` means "the shipped default" (ORDER) and is the ONLY spelling
+    that lets it be overruled: a combination exec can't serve falls back to
+    ORDER_SOURCE, where an explicit ORDER_EXEC exits. That distinction is the
+    whole reason the parameter carries a None sentinel rather than defaulting
+    to ORDER directly."""
     source = resolve_footnotes(open(source_path).read())
     code_lines, markers = parse(source)
     unnarrated = False
@@ -2544,13 +2584,29 @@ def _build_all_beats(source_path, trace, every, allow_unnarrated=False,
             sys.exit("Nothing to render: the snippet has no code lines.")
         unnarrated = True
 
+    # ORDER (exec) is the shipped default, so a run it cannot serve makes it
+    # STEP ASIDE rather than refuse: only a caller who actually asked for it
+    # (--order exec, SNIPPET_CAST_ORDER, order=) gets the error. Without this,
+    # defaulting to exec would make a plain --every, --no-trace or
+    # 'N) '-numbered file fail to render at all.
+    auto_order = order is None
+    if auto_order:
+        order = ORDER
     if order == ORDER_EXEC:
-        if not trace:
-            sys.exit("--order exec needs execution to know the order; "
-                     "drop --no-trace.")
-        if every:
-            sys.exit("--order exec has no meaning with --every, which already "
-                     "plays one beat per execution; drop one of them.")
+        clash = (
+            "--order exec needs execution to know the order; drop --no-trace."
+            if not trace else
+            "--order exec has no meaning with --every, which already plays "
+            "one beat per execution; drop one of them."
+            if every else
+            "--order exec shows the whole snippet from the first frame, so "
+            "there is no progressive reveal left for an unnarrated --pause "
+            "render; drop one of them."
+            if unnarrated else None)
+        if clash:
+            if not auto_order:
+                sys.exit(clash)
+            order = ORDER_SOURCE
 
     two_pass = any(TWO_PASS_SEP in m.text for m in markers)
     if two_pass and every:
@@ -2559,10 +2615,12 @@ def _build_all_beats(source_path, trace, every, allow_unnarrated=False,
     if order == ORDER_EXEC and any(
             _parse_order(split_narration(m.text)[1] if two_pass else m.text)[0]
             is not None for m in markers):
-        sys.exit("--order exec and numbered 'N) ' prefixes are two different "
-                 "orders for the same pass — drop one. (In two-pass mode only "
-                 "the walkthrough side is affected; number the writing side "
-                 "instead if you want that ordered.)")
+        if not auto_order:
+            sys.exit("--order exec and numbered 'N) ' prefixes are two different "
+                     "orders for the same pass — drop one. (In two-pass mode only "
+                     "the walkthrough side is affected; number the writing side "
+                     "instead if you want that ordered.)")
+        order = ORDER_SOURCE     # the file's own numbering wins over a default
     if not two_pass:
         if every and any(_parse_order(m.text)[0] is not None for m in markers):
             sys.exit("Numbered 'N) ' order prefixes require first-exec mode; "
@@ -2595,7 +2653,7 @@ def build(source_path, out_path, tts, trace=True, every=False,
           state_bg_color=None, state_fg_color=None,
           highlight_color=_USE_DEFAULT, allow_unnarrated=False,
           font_size=None, screenflow=None, quiet=False,
-          order=ORDER_SOURCE):
+          order=None):
     """
     Render an annotated Python snippet into a narrated screencast video.
 
@@ -2668,10 +2726,22 @@ def build(source_path, out_path, tts, trace=True, every=False,
         `ValueError` (the CLI turns that into an exit naming a `font_size`
         that would fit) rather than being silently shrunk.
     quiet :
-        Suppress every progress line, note and trace warning — and whatever
-        the snippet itself prints while being traced. Errors are NOT
-        suppressed: they still raise/`sys.exit` to stderr, so a quiet run
-        that fails can't be mistaken for one that succeeded.
+        Suppress every progress line and `"note: ..."` — and whatever the
+        snippet itself prints while being traced. What survives is failure:
+        the `"! ..."` lines for a snippet that won't compile or raised
+        part-way (stderr, via `_warn()`) and errors, which still
+        raise/`sys.exit`. So a quiet run that fails can't be mistaken for a
+        clean one. Both front ends default this to True (`-v`/`--verbose`
+        turns the chatter back on); the default here is False, so a library
+        caller keeps the output it has always had unless it asks otherwise.
+    order :
+        Playback order of the narrated lines: `ORDER_SOURCE` (top to bottom,
+        or the `"N) "` order the file gives) or `ORDER_EXEC` (the order
+        Python visits them — see `_exec_beats()`). None, the default, means
+        `ORDER` (currently `ORDER_EXEC`) wherever it applies and
+        `ORDER_SOURCE` wherever it can't: with `trace=False`, `every=True`,
+        an `"N) "`-numbered file, or an unnarrated `allow_unnarrated` render.
+        Passing `ORDER_EXEC` explicitly makes each of those an error instead.
     manual_audio_dir :
         Directory of pre-recorded audio files for `tts="manual"`, named
         001.wav, 002.wav, ... (or .mp3/.m4a/.aiff/.flac/.ogg) matching
@@ -2759,7 +2829,7 @@ def build(source_path, out_path, tts, trace=True, every=False,
 def _build(source_path, out_path, tts, trace, every, subtitles, typing,
            typing_speed, pause, manual_audio_dir, style, bg_color,
            state_bg_color, state_fg_color, highlight_color,
-           allow_unnarrated, font_size, screenflow, order=ORDER_SOURCE):
+           allow_unnarrated, font_size, screenflow, order=None):
     """build()'s body, split out only so build() can wrap the whole thing in
     _quieted() without indenting every line of it."""
     if tts == "manual":
@@ -2966,7 +3036,7 @@ def _format_script(beats1, beats2):
 
 
 def export_script(source_path, trace=True, every=False, quiet=False,
-                  order=ORDER_SOURCE):
+                  order=None):
     """Parse `source_path`, build beats for both passes (or just the
     walkthrough pass, for a file with no '/'), and return the ordered,
     numbered narration script — the exact order/dedup `build()` uses to
@@ -3172,7 +3242,7 @@ def record_narration(source_path, manual_audio_dir, out_path, trace=True,
                      build_after=True, input_fn=input,
                      record_fn=_record_until_enter, play_fn=_play,
                      frame_fn=None, font_size=None, screenflow=None,
-                     order=ORDER_SOURCE,
+                     order=None,
                      style=None, bg_color=_USE_DEFAULT,
                      state_bg_color=None, state_fg_color=None,
                      highlight_color=_USE_DEFAULT):
@@ -3640,15 +3710,24 @@ def main():
                          f"the file gives) or {ORDER_EXEC!r} (the order Python "
                          "visits them — each line highlighted on entry with its "
                          "pre-state, then again on completion, where the "
-                         "narration plays). 'exec' needs the trace and is "
-                         "redundant with --every "
-                         f"[default: {ORDER_SOURCE}; env: SNIPPET_CAST_ORDER]")
+                         "narration plays). Left at the default, 'exec' steps "
+                         "aside for a run it can't serve (--no-trace, --every, "
+                         "an 'N) '-numbered file, an unnarrated --pause "
+                         "render); passing it explicitly makes those an error "
+                         f"[default: {ORDER}; env: SNIPPET_CAST_ORDER]")
     ap.add_argument("-q", "--quiet", action=argparse.BooleanOptionalAction,
                     default=None,
-                    help="suppress progress, notes and the traced snippet's own "
-                         "output; errors still go to stderr, and "
-                         "--export-script/--style list still print their result "
-                         "[env: SNIPPET_CAST_QUIET]")
+                    help="suppress progress, 'note:' advice and the traced "
+                         "snippet's own output. ON BY DEFAULT — use "
+                         "-v/--verbose (or --no-quiet) to see them. A snippet "
+                         "that won't compile or raises still reports on "
+                         "stderr, as do errors, and --export-script/--style "
+                         "list still print their result "
+                         "[default: on; env: SNIPPET_CAST_QUIET]")
+    ap.add_argument("-v", "--verbose", action="store_true", default=None,
+                    help="print the per-beat progress and every 'note:' — the "
+                         "inverse of -q/--quiet, which is on by default. Wins "
+                         "over -q if both are given [env: SNIPPET_CAST_VERBOSE]")
     ap.add_argument("--no-frame", action="store_true", default=None,
                     help="with --record, don't pop each beat's rendered frame in "
                          "the system image viewer [env: SNIPPET_CAST_NO_FRAME]")
@@ -3684,6 +3763,11 @@ def main():
     # typing "--record --tts say", not to veto --record because a
     # project-wide activation env happens to name a backend.
     tts_explicit = args.tts is not None
+    # Same "flag only" rule, and for the same reason: --quiet is ON by default
+    # now, so a bare --record must NOT trip the "recording is interactive"
+    # check below — only someone who actually typed -q did the thing that
+    # check exists to catch.
+    quiet_explicit = args.quiet is not None
     # Compared against the default, not merely "is it set": a project-wide
     # activation env (pixi's [tool.pixi.activation.env], a shell profile) may
     # materialise EVERY SNIPPET_CAST_* var at its default value, and that is
@@ -3707,11 +3791,24 @@ def main():
         args, tts="say", no_trace=False, every=False, subtitles=False, typing=False,
         typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT, export_script=False,
         manual_audio_dir=MANUAL_AUDIO_DIR_DEFAULT, record=False, no_frame=False,
-        quiet=False, order=ORDER_SOURCE,
+        quiet=True, verbose=False, order=None,
         name="out", output_dir=".", style=STYLE,
         bg_color=BG_COLOR if BG_COLOR else BG_COLOR_NONE,
         state_bg_color=PANEL_BG, state_fg_color=None,
         highlight_color=HIGHLIGHT_COLOR, font_size=FONT_SIZE, screenflow=None)
+    # -v/--verbose is simply the inverse of -q/--quiet, which is on by
+    # default; it wins when both are given, since it is the one that had to be
+    # typed to mean anything. (--no-quiet says the same thing.)
+    if args.verbose:
+        args.quiet = False
+    if args.record:
+        # Recording is an interactive session whose prompts ARE its output, so
+        # the quiet default must never silence it. Only an explicit -q is the
+        # mistake worth refusing; otherwise the default just steps aside.
+        if args.quiet and quiet_explicit:
+            sys.exit("--quiet can't be used with --record: recording is an "
+                     "interactive session whose prompts are that output.")
+        args.quiet = False
     global _QUIET
     _QUIET = bool(args.quiet)     # covers every _say() from here on, including
                                   # the argument-validation notes just below
@@ -3754,9 +3851,6 @@ def main():
         sys.exit(f"--font-size must be >= {FONT_SIZE_MIN}.")
 
     if args.record:
-        if args.quiet:
-            sys.exit("--quiet can't be used with --record: recording is an "
-                     "interactive session whose prompts are that output.")
         if tts_explicit and args.tts != "manual":
             sys.exit(f"--record always uses the manual backend; got --tts {args.tts!r}. "
                      "Drop --tts (or set it to manual) when using --record.")

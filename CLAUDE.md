@@ -28,7 +28,10 @@ build's auto-mirrored `run:` requirements don't break.
 pixi install                     # installs ffmpeg + pillow + pygments + snippet-cast (editable)
 
 # run — proofing loop (no audio backend needed, fast)
+# Defaults: --tts say (macOS), --order exec, and QUIET (add -v for progress).
 pixi run snippet-cast test/data/fib.py  -o out.mp4 --tts silent --subtitles
+pixi run snippet-cast test/data/fib.py  -o out.mp4 --tts silent -v            # per-beat progress
+pixi run snippet-cast test/data/fib.py  -o out.mp4 --tts silent --order source # old top-to-bottom playback
 
 # run — feature combinations
 pixi run snippet-cast test/data/fib.py  -o out.mp4 --typing --subtitles      # first-exec + typing
@@ -74,7 +77,7 @@ manual recipe used to sanity-check rendered video output.
 |---|---|
 | `src/snippet_cast/screencast.py` | The entire tool (~700 lines): parse → trace → beats → render → TTS → assemble. |
 | `src/snippet_cast/__init__.py` | Public API: exports `build` (programmatic), `export_script`, `record_narration`, and `main` (CLI entry point). |
-| `src/snippet_cast/magic.py` | Jupyter `%%snippet-cast` cell magic (`pip install snippet-cast[jupyter]`; both `import snippet_cast` and `import snippet_cast.magic` auto-register it inside a live kernel, or use `%load_ext snippet_cast.magic`). `__init__.py` only imports it conditionally — behind the same `get_ipython()`-gated check `magic.py` itself uses — so `import snippet_cast` outside a live kernel, or without IPython installed, still never requires IPython. It's a thin wrapper: writes the cell to a temp `.py` file, calls `build()`/`export_script()`/`record_narration()`, displays the result with `IPython.display.Video`. `--record`'s `input()` prompts work the same in a notebook cell as a terminal — no special-casing needed. |
+| `src/snippet_cast/magic.py` | Jupyter `%%snippet-cast` cell magic (`pip install snippet-cast[jupyter]`; both `import snippet_cast` and `import snippet_cast.magic` auto-register it inside a live kernel, or use `%load_ext snippet_cast.magic`). `__init__.py` only imports it conditionally — behind the same `get_ipython()`-gated check `magic.py` itself uses — so `import snippet_cast` outside a live kernel, or without IPython installed, still never requires IPython. It's a thin wrapper: writes the cell to a temp `.py` file, calls `build()`/`export_script()`/`record_narration()`, displays the result with `IPython.display.Video`. `--record`'s `input()` prompts work the same in a notebook cell as a terminal — no special-casing needed. Its option defaults now match the CLI's exactly (`--tts say`, `--order exec`, quiet with `-v` to opt back in) — the historical "`--tts` defaults to `silent` in a notebook" difference is gone, so a non-macOS notebook needs `--tts silent` or `SNIPPET_CAST_TTS` set once. |
 | `SETUP.md` | How to configure every TTS backend (`say`, `manual`/`--record`, Piper, ElevenLabs). |
 | `test/data/fib.py`, `test/data/loop.py`, `test/data/twopass.py`, `test/data/footnote.py`, `test/data/plain.py` | Sample snippets used by tests and for manual verification (`twopass.py` exercises `/`-split, two-pass narration; `footnote.py` exercises `#: N)` footnote bodies; `plain.py` carries NO narration at all, for the `--pause`-only silent render). |
 | `test/test_screencast.py` | Automated tests: parsing, tracing, beat construction, and a full-render smoke test. |
@@ -242,6 +245,14 @@ third answer to "what order do the beats play in", alongside source order and
 `N)` numbering. `ORDER_EXEC` hands beat construction to `_exec_beats()`
 instead of `build_beats()`'s usual loop.
 
+**`exec` is the SHIPPED DEFAULT** (`ORDER = ORDER_EXEC`), which is why every
+layer down to `_build_all_beats()` takes `order=None` rather than defaulting
+to `ORDER` outright: `None` means "the default", and a default is allowed to
+STEP ASIDE where an explicit request would be refused (see "Refused
+combinations" below). Only `_build_all_beats()` resolves it — `build_beats()`
+and `_two_pass_beats()` keep `order=ORDER_SOURCE` as their neutral parameter
+default, since they are only ever handed an already-resolved value.
+
 Each marked line contributes one beat per KIND of visit, in time order:
 `"enter"` (about to run — its pre-state), `"call"` (a function being entered,
 on its `def` line, showing the parameters as just bound) and `"done"` (it has
@@ -295,11 +306,18 @@ though it never completed normally.
 `call_entry` bool; `build_beats()` filters to `kind == "done"` for
 `env_before()` and `--every`, exactly as it filtered out `call_entry` before.
 
-Refused combinations, all `sys.exit`: `--no-trace` (there is no order without
-running), `--every` (already one beat per execution), and `N)` prefixes in the
-affected pass (two different answers to the same question). In two-pass mode
-it applies to the WALKTHROUGH only — pass 1 is someone writing the code, which
-happens top-to-bottom.
+Refused combinations, all `sys.exit` **when `exec` was asked for explicitly**:
+`--no-trace` (there is no order without running), `--every` (already one beat
+per execution), `N)` prefixes in the affected pass (two different answers to
+the same question), and an unnarrated `--pause` render (exec shows the whole
+snippet from frame one, so there is no progressive reveal left — the one thing
+that mode is for). **Left at the default, each of those makes exec fall back
+to `ORDER_SOURCE` instead** — `_build_all_beats()`'s `auto_order` flag. That
+fallback is load-bearing, not a nicety: with exec shipped as the default, a
+plain `--every`, a plain `--no-trace` and every `N)`-numbered file would
+otherwise refuse to render at all. In two-pass mode it applies to the
+WALKTHROUGH only — pass 1 is someone writing the code, which happens
+top-to-bottom.
 
 #### Custom narration order (first-exec only, orthogonal to two-pass)
 
@@ -856,8 +874,8 @@ the next). `resolve_env_defaults()` is instead called from inside the method
 body, which *does* run fresh every cell — the fix.
 
 Boolean flags (`--every`, `--subtitles`, `--typing`, `--record`,
-`--export-script`) use `argparse.BooleanOptionalAction` (confirmed to work
-through IPython's `magic_arguments`/`parse_argstring`, not just plain
+`--export-script`, `--quiet`) use `argparse.BooleanOptionalAction` (confirmed
+to work through IPython's `magic_arguments`/`parse_argstring`, not just plain
 argparse) so an env-var-forced-on default can still be turned back off for
 one run via `--no-X` — in both `main()` and `magic.py`, kept in sync.
 `--no-trace`/`--no-frame` are the exception: already negatively named, so
@@ -865,6 +883,11 @@ one run via `--no-X` — in both `main()` and `magic.py`, kept in sync.
 plain `store_true` with `default=None`, resolved the same way — an env var
 can force them on, with no CLI opt-out beyond not passing the flag /
 env var (documented limitation, not a bug).
+
+`-v/--verbose` is a plain `store_true` with `default=None`, resolved through
+the same machinery (fallback `False`, env `SNIPPET_CAST_VERBOSE`) and then
+folded into `quiet` by hand — it is not an independent setting, just the
+readable spelling of `--no-quiet` now that `--quiet` defaults to on.
 
 `-n/--name` (default `"out"`) and `-d/--output-dir` (default `.`, created if
 missing) build the output path as `output_dir/name.mp4` via
@@ -1331,11 +1354,30 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   self-contained pages, immune to both resource copying and `freeze`, at
   roughly +35% page size per video.
 - **Silence the terminal:** `-q`/`--quiet` (`SNIPPET_CAST_QUIET`,
-  `build(quiet=...)`, `export_script(quiet=...)`). Every informational print
-  goes through `_say()`, a one-line wrapper over `print()` gated on the
-  module-level `_QUIET`; `_quieted(bool)` is the context manager that sets it
-  (restoring the previous value, and nesting can only ever TIGHTEN — an inner
-  `quiet=False` cannot un-quiet an outer `quiet=True`).
+  `build(quiet=...)`, `export_script(quiet=...)`), **on by default in both
+  front ends**, with `-v`/`--verbose` (`SNIPPET_CAST_VERBOSE`) as its inverse.
+  Progress chatter goes through `_say()`, a one-line wrapper over `print()`
+  gated on the module-level `_QUIET`; `_quieted(bool)` is the context manager
+  that sets it (restoring the previous value, and nesting can only ever
+  TIGHTEN — an inner `quiet=False` cannot un-quiet an outer `quiet=True`).
+
+  **Notes and warnings go through `_warn()` instead — stderr, never
+  silenced.** That second channel exists BECAUSE quiet is now the default: a
+  snippet that raised part-way, narration the chosen order cannot show, a
+  footnote label used twice on code lines, a flag with no effect in this
+  combination — routed through `_say()` they would be invisible on an
+  ordinary run. stderr rather than stdout specifically so they stay out of
+  `--export-script -q > script.txt`, whose stdout IS the script.
+
+  `-v` and `-q` are resolved in each front end right after
+  `resolve_env_defaults()` (`if args.verbose: args.quiet = False`), so
+  `--verbose` wins when both are given — it is the one that had to be typed
+  to mean anything. `--no-quiet` says the same thing, via
+  `BooleanOptionalAction`.
+
+  The library keeps `quiet=False`: `build()`/`export_script()` print unless
+  asked not to, so a programmatic caller's stdout is not changed under it.
+  Only `main()` and the cell magic default it to True.
 
   A module flag rather than a threaded parameter because this is
   cross-cutting: `trace_run()`, `resolve_footnotes()`, `_build_all_beats()`,
@@ -1347,19 +1389,27 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   even called.
 
   Three deliberate exclusions:
-  - **Errors are never silenced.** They go out via `sys.exit`/stderr, which
-    `_say()` doesn't touch, so a quiet run that fails still says why.
+  - **Errors and warnings are never silenced.** Errors go out via
+    `sys.exit`/stderr, which `_say()` doesn't touch; warnings go out via
+    `_warn()`, also stderr. So a quiet run that fails, mis-traces or drops
+    narration still says why.
   - **`--export-script` and `--style list` still print.** Those lines are the
-    command's RESULT, not chatter — `-q` just strips the trace warnings
-    around them, which is what makes `--export-script -q > script.txt` clean.
-  - **`--record` rejects `--quiet`** outright: recording is an interactive
-    session whose prompts ARE its output.
+    command's RESULT, not chatter — `-q` just strips the progress around
+    them, which is what makes `--export-script -q > script.txt` clean.
+  - **`--record` forces verbose**: recording is an interactive session whose
+    prompts ARE its output. Only an EXPLICIT `-q` is still refused
+    (`quiet_explicit`, captured before `resolve_env_defaults()` fills the
+    `True` fallback in — same flag-only rule as `tts_explicit`). Testing the
+    resolved value instead would make every `--record` run exit before
+    recording anything.
 
   `_quiet_stdout()` additionally redirects the traced snippet's own `print()`
   output (`trace_run()` executes user code) — a no-op when not quiet.
 - **Play beats in execution order:** `--order exec` (`SNIPPET_CAST_ORDER`,
-  `build(order=...)`) — `_exec_beats()`; see the section above for the
-  entry/call/done visit model and its rules.
+  `build(order=...)`) — `_exec_beats()`; **the shipped default** (`ORDER`).
+  See the section above for the entry/call/done visit model, the `order=None`
+  sentinel and the step-aside rules. `--order source` is how you get the old
+  top-to-bottom playback back.
 - **Change the narration marker:** `MARKER` (keep it a valid `#` comment prefix).
 - **Adjust typing speed:** default is `TYPE_SPEED` (seconds/char, currently
   `0.1`), overridable per-run with `--typing-speed`. There is only ONE

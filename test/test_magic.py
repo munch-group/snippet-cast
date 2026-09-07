@@ -264,7 +264,8 @@ def test_cell_magic_quiet_suppresses_output(ip, tmp_path, capsys):
     out = tmp_path / "q.mp4"
     cell = 'x = 1  #: one\nprint("snippet output")  #: two\n'
 
-    ip.run_cell(f"%%snippet-cast -o {out} --tts silent\n{cell}")
+    # -v, because --quiet is the shipped default for the cell magic too.
+    ip.run_cell(f"%%snippet-cast -o {out} --tts silent -v\n{cell}")
     assert "done." in capsys.readouterr().out
 
     out2 = tmp_path / "q2.mp4"
@@ -277,6 +278,43 @@ def test_cell_magic_quiet_suppresses_output(ip, tmp_path, capsys):
     assert "beats ->" not in quiet
     assert "snippet output" not in quiet     # the cell's own print, too
     assert out2.exists()
+
+
+def test_cell_magic_defaults_to_the_say_backend_and_the_none_order(ip, tmp_path, monkeypatch):
+    """The cell magic used to default to --tts silent; it now matches the CLI.
+    `order=None` (not ORDER itself) is what lets exec step aside for a cell it
+    can't serve."""
+    monkeypatch.chdir(tmp_path)
+    seen = {}
+
+    def spy(source_path, out_path, tts, **kw):
+        seen["tts"] = tts
+        seen.update(kw)
+        Path(out_path).write_bytes(b"fake-mp4")
+
+    monkeypatch.setattr(sc_magic, "build", spy)
+    ip.run_cell("%%snippet-cast\nx = 1  #: one\n")
+
+    assert seen["tts"] == "say"
+    assert seen["order"] is None
+    assert seen["quiet"] is True
+
+
+def test_cell_magic_record_is_not_refused_by_the_quiet_default(ip, tmp_path, monkeypatch, capsys):
+    """--quiet is the cell magic's default too, so only an explicit -q may
+    refuse --record — see the same check in main()."""
+    monkeypatch.chdir(tmp_path)
+    seen = {}
+
+    def fake_record(source_path, manual_audio_dir, out_path, **kw):
+        seen["quiet_default_survived"] = True
+        return False        # aborted: nothing further to display
+
+    monkeypatch.setattr(sc_magic, "record_narration", fake_record)
+    ip.run_cell("%%snippet-cast --record\nx = 1  #: one\n")
+
+    assert seen.get("quiet_default_survived") is True
+    assert "--quiet can't be used with --record" not in capsys.readouterr().err
 
 
 def test_cell_magic_quiet_rejects_record(ip, capsys):

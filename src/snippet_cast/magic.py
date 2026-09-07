@@ -32,9 +32,14 @@ All the flags `snippet-cast --help` lists are available here too (`--tts`,
 `--export-script`, `--tts manual --manual-audio-dir DIR`, `--record`
 `--no-frame`, `-n/--name`, `-d/--output-dir` — see SETUP.md for the
 interactive-recording workflow, which works the same in a notebook cell as
-in a terminal), with one deliberate difference: `--tts` defaults to `silent`
-here (not `say`), since it's the only backend guaranteed to work without any
-setup, in any notebook environment.
+in a terminal). `--tts` defaults to `say` here, exactly as on the CLI — that
+is macOS-only, so on another platform either pass `--tts silent` (a timing
+stand-in that always works, with no setup) or set `SNIPPET_CAST_TTS` once in
+an earlier cell.
+
+Output is QUIET by default, again as on the CLI: the per-beat commentary and
+every `note:` need `-v`/`--verbose`. Only a snippet that won't compile or
+raises part-way still reports on its own (stderr), along with errors.
 
 Every flag (except -o/--output) also has a `SNIPPET_CAST_<NAME>` environment
 variable default, e.g. `os.environ["SNIPPET_CAST_PAUSE"] = "0.6"` in an
@@ -70,6 +75,7 @@ from .screencast import (
     HIGHLIGHT_COLOR,
     HIGHLIGHT_PANEL,
     MANUAL_AUDIO_DIR_DEFAULT,
+    ORDER,
     ORDER_EXEC,
     ORDER_SOURCE,
     PANEL_BG,
@@ -355,11 +361,11 @@ class SnippetCastMagics(Magics):
                    "given (created if missing) [default: current directory; "
                    "env: SNIPPET_CAST_OUTPUT_DIR]")
     @argument("--tts", choices=list(BACKENDS), default=None,
-              help="TTS backend [default: silent here — always works, no "
-                   "setup; see SETUP.md for piper/elevenlabs; "
-                   "env: SNIPPET_CAST_TTS] (--record implies manual; passing "
-                   "--tts explicitly as anything else together with --record "
-                   "is an error)")
+              help="TTS backend [default: say — macOS only, so pass "
+                   "--tts silent (a no-setup timing stand-in) elsewhere; see "
+                   "SETUP.md for piper/elevenlabs; env: SNIPPET_CAST_TTS] "
+                   "(--record implies manual; passing --tts explicitly as "
+                   "anything else together with --record is an error)")
     @argument("--no-trace", action="store_true", default=None,
               help="don't execute the snippet; skip the state panel "
                    "[env: SNIPPET_CAST_NO_TRACE]")
@@ -451,13 +457,22 @@ class SnippetCastMagics(Magics):
                    f"{ORDER_SOURCE!r} (top to bottom, or the 'N) ' order the "
                    f"cell gives) or {ORDER_EXEC!r} (the order Python visits "
                    "them — each line highlighted on entry with its pre-state, "
-                   "then again on completion, where the narration plays) "
-                   f"[default: {ORDER_SOURCE}; env: SNIPPET_CAST_ORDER]")
+                   "then again on completion, where the narration plays). "
+                   "Left at the default, 'exec' steps aside for a cell it "
+                   "can't serve (--no-trace, --every, 'N) ' numbering, an "
+                   "unnarrated --pause render); passing it explicitly makes "
+                   f"those an error [default: {ORDER}; env: SNIPPET_CAST_ORDER]")
     @argument("-q", "--quiet", action=argparse.BooleanOptionalAction,
               default=None,
-              help="suppress progress, notes and the cell's own output; errors "
-                   "still print, and --export-script still returns its script "
-                   "[env: SNIPPET_CAST_QUIET]")
+              help="suppress progress, 'note:' advice and the cell's own "
+                   "output. ON BY DEFAULT — use -v/--verbose (or --no-quiet) "
+                   "to see them. A snippet that won't compile or raises still "
+                   "reports on stderr, as do errors, and --export-script still "
+                   "returns its script [default: on; env: SNIPPET_CAST_QUIET]")
+    @argument("-v", "--verbose", action="store_true", default=None,
+              help="print the per-beat progress and every 'note:' — the "
+                   "inverse of -q/--quiet, which is on by default. Wins over "
+                   "-q if both are given [env: SNIPPET_CAST_VERBOSE]")
     @argument("--no-frame", action="store_true", default=None,
               help="with --record, don't pop each beat's rendered frame in "
                    "the system image viewer [env: SNIPPET_CAST_NO_FRAME]")
@@ -501,6 +516,11 @@ class SnippetCastMagics(Magics):
         # typing "--record --tts say", not to veto --record because a
         # project-wide activation env happens to name a backend.
         tts_explicit = args.tts is not None
+        # Same "flag only" rule, and for the same reason: --quiet is ON by
+        # default now, so a bare --record must NOT trip the "recording is
+        # interactive" check below — only someone who actually typed -q did
+        # the thing that check exists to catch.
+        quiet_explicit = args.quiet is not None
         # Compared against the default, not merely "is it set": a project-wide
         # activation env (pixi's [tool.pixi.activation.env], a shell profile) may
         # materialise EVERY SNIPPET_CAST_* var at its default value, and that is
@@ -531,15 +551,20 @@ class SnippetCastMagics(Magics):
             or os.environ.get("SNIPPET_CAST_NAME", "out") != "out"
             or os.environ.get("SNIPPET_CAST_OUTPUT_DIR", ".") != ".")
         resolve_env_defaults(
-            args, tts="silent", no_trace=False, every=False, subtitles=False,
+            args, tts="say", no_trace=False, every=False, subtitles=False,
             typing=False, typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT, export_script=False,
             manual_audio_dir=MANUAL_AUDIO_DIR_DEFAULT, record=False, no_frame=False,
-            quiet=False, responsive=True, order=ORDER_SOURCE,
+            quiet=True, verbose=False, responsive=True, order=None,
             name="out", output_dir=".", style=STYLE,
             bg_color=BG_COLOR if BG_COLOR else BG_COLOR_NONE,
             state_bg_color=PANEL_BG, state_fg_color=None,
             highlight_color=HIGHLIGHT_COLOR, font_size=FONT_SIZE,
             screenflow=None)
+        # -v/--verbose is simply the inverse of -q/--quiet, which is on by
+        # default; it wins when both are given, since it is the one that had
+        # to be typed to mean anything. (--no-quiet says the same thing.)
+        if args.verbose:
+            args.quiet = False
         # Tri-state, so it can't go through resolve_env_defaults(), whose
         # whole contract is "fill anything still None" — None is a meaningful
         # value here (auto-detect from the frame background).
@@ -572,11 +597,15 @@ class SnippetCastMagics(Magics):
             return
 
         if args.record:
-            if args.quiet:
+            # Recording is an interactive session whose prompts ARE its
+            # output, so the quiet default must never silence it. Only an
+            # explicit -q is the mistake worth refusing.
+            if args.quiet and quiet_explicit:
                 print("snippet-cast: --quiet can't be used with --record: "
                       "recording is an interactive session whose prompts are "
                       "that output.", file=sys.stderr)
                 return
+            args.quiet = False
             if tts_explicit and args.tts != "manual":
                 print(f"snippet-cast: --record always uses the manual backend; "
                       f"got --tts {args.tts!r}. Drop --tts (or set it to manual) "
