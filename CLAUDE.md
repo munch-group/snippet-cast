@@ -1361,13 +1361,16 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   that sets it (restoring the previous value, and nesting can only ever
   TIGHTEN — an inner `quiet=False` cannot un-quiet an outer `quiet=True`).
 
-  **Notes and warnings go through `_warn()` instead — stderr, never
-  silenced.** That second channel exists BECAUSE quiet is now the default: a
-  snippet that raised part-way, narration the chosen order cannot show, a
-  footnote label used twice on code lines, a flag with no effect in this
-  combination — routed through `_say()` they would be invisible on an
-  ordinary run. stderr rather than stdout specifically so they stay out of
-  `--export-script -q > script.txt`, whose stdout IS the script.
+  **The `! ...` lines go through `_warn()` instead — stderr, never
+  silenced.** The line between the two channels is **failure vs. advice, not
+  severity of wording**: `_warn()` is only for the snippet failing to compile
+  or raising part-way, where the state panels are genuinely incomplete
+  through no fault of the input. Every `note: ...` — a flag with no effect in
+  this combination, narration the chosen order can't show, a footnote label
+  left alone, lines an untaken branch dropped — is ADVICE about a render that
+  is still exactly what the input asked for, so it is chatter and stays on
+  `_say()`, i.e. `-v` only. stderr for `_warn()` specifically so it stays out
+  of `--export-script -q > script.txt`, whose stdout IS the script.
 
   `-v` and `-q` are resolved in each front end right after
   `resolve_env_defaults()` (`if args.verbose: args.quiet = False`), so
@@ -1389,10 +1392,10 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   even called.
 
   Three deliberate exclusions:
-  - **Errors and warnings are never silenced.** Errors go out via
-    `sys.exit`/stderr, which `_say()` doesn't touch; warnings go out via
-    `_warn()`, also stderr. So a quiet run that fails, mis-traces or drops
-    narration still says why.
+  - **Errors and real failures are never silenced.** Errors go out via
+    `sys.exit`/stderr, which `_say()` doesn't touch; the `!` lines go out via
+    `_warn()`, also stderr. So a quiet run that fails or mis-traces still
+    says why. (A `note:` is NOT in this set — see above.)
   - **`--export-script` and `--style list` still print.** Those lines are the
     command's RESULT, not chatter — `-q` just strips the progress around
     them, which is what makes `--export-script -q > script.txt` clean.

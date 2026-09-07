@@ -21,6 +21,7 @@ snippet_cast.screencast.build(
     font_size=None,
     screenflow=None,
     quiet=False,
+    order=None,
 )
 ```
 
@@ -82,7 +83,11 @@ still-frame-plus-narration clip per beat into `out_path` with ffmpeg.
 
 <code>[**quiet**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [False]{.parameter-default}</code>
 
-:   Suppress every progress line, note and trace warning — and whatever the snippet itself prints while being traced. Errors are NOT suppressed: they still raise/`sys.exit` to stderr, so a quiet run that fails can't be mistaken for one that succeeded.
+:   Suppress every progress line and `"note: ..."` — and whatever the snippet itself prints while being traced. What survives is failure: the `"! ..."` lines for a snippet that won't compile or raised part-way (stderr, via `_warn()`) and errors, which still raise/`sys.exit`. So a quiet run that fails can't be mistaken for a clean one. Both front ends default this to True (`-v`/`--verbose` turns the chatter back on); the default here is False, so a library caller keeps the output it has always had unless it asks otherwise.
+
+<code>[**order**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [None]{.parameter-default}</code>
+
+:   Playback order of the narrated lines: `ORDER_SOURCE` (top to bottom, or the `"N) "` order the file gives) or `ORDER_EXEC` (the order Python visits them — see `_exec_beats()`). None, the default, means `ORDER` (currently `ORDER_EXEC`) wherever it applies and `ORDER_SOURCE` wherever it can't: with `trace=False`, `every=True`, an `"N) "`-numbered file, or an unnarrated `allow_unnarrated` render. Passing `ORDER_EXEC` explicitly makes each of those an error instead.
 
 <code>[**manual_audio_dir**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [None]{.parameter-default}</code>
 
@@ -102,7 +107,7 @@ still-frame-plus-narration clip per beat into `out_path` with ffmpeg.
 
 <code>[**state_fg_color**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [None]{.parameter-default}</code>
 
-:   `"#rrggbb"` for ALL of the state panel's text — variable names and values both — with the "STATE" header blended `HEADER_DIM` toward the panel background so it stays subordinate. `None` keeps the default three-color scheme (`COL_NAME`/`COL_VALUE`/`COL_HEADER`), which is also where to go for finer control than one color gives.
+:   `"#rrggbb"` for ALL of the state panel's text — variable names and values both. `None` keeps the default two-color scheme (`COL_NAME`/`COL_VALUE`), which is also where to go for finer control than one color gives.
 
 <code>[**bg_color**]{.parameter-name} [:]{.parameter-annotation-sep} []{.parameter-annotation} [ = ]{.parameter-default-sep} [_USE_DEFAULT]{.parameter-default}</code>
 

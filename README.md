@@ -101,12 +101,13 @@ os.environ["SNIPPET_CAST_OUTPUT_DIR"] = "./videos"
 set in one notebook cell, applies to every `%%snippet-cast` cell after it
 (picked up fresh each time, so setting it in a later cell still works).
 
-Runs are **quiet by default** — notes, warnings and errors still go to
-stderr, but the per-beat progress needs `-v`/`--verbose`. The other shipped
-defaults are `--tts say` (macOS; pass `--tts silent` elsewhere) and
-`--order exec`, which highlights each line on the way in and again on the way
-out, in the order Python visits them; `--order source` gives the plain
-top-to-bottom playback.
+Runs are **quiet by default** — the per-beat progress and every `note:` need
+`-v`/`--verbose`. A snippet that won't compile or raises part-way still
+reports on stderr, as do errors. The other shipped defaults are `--tts say`
+(macOS; pass `--tts silent` elsewhere) and `--order exec`, which highlights
+each line on the way in and again on the way out, in the order Python visits
+them; `--order source` gives the plain top-to-bottom playback.
+
 Toggle flags (`--every`, `--subtitles`, `--typing`, `--record`,
 `--export-script`) accept `--no-X` to override an env-var-forced default back
 off for one run.
