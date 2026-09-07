@@ -912,6 +912,80 @@ def test_no_entry_warning_when_exec_order_will_use_it(tmp_path, capsys):
     assert "entry narration" not in capsys.readouterr().out
 
 
+RECURSIVE = """\
+def fact(n):                #: define it
+    if n <= 1:              #: base case, n is {n}
+        return 1            #: bottom out
+    return n * fact(n - 1)  #: recurse with n={n}
+r = fact(4)                 #: result is {r}
+"""
+
+
+def test_trace_records_call_depth():
+    steps = trace_run(RECURSIVE, "<rec>")
+    assert max(st.depth for st in steps) == 4          # module 0, four calls
+    assert [st.disp["n"] for st in steps if st.kind == "call"] == ["4", "3", "2", "1"]
+
+
+def test_frame_id_is_an_ordinal_not_a_reused_address():
+    """id(frame) is recycled once a frame is freed, so two sequential calls to
+    the same function could compare equal and be read as one scope."""
+    src = "def f(v):\n    return v\na = f(1)\nb = f(2)\n"
+    steps = trace_run(src, "<seq>")
+    ids = {st.frame_id for st in steps}
+    assert len(ids) == 3                    # module + two distinct calls
+    assert ids == set(range(len(ids)))      # a plain 0..n-1 ordinal
+
+
+def test_source_order_pins_a_recursive_body_to_the_outermost_call():
+    """Steps arrive in completion order and recursion completes inside-out, so
+    "the first step for this line" used to be the DEEPEST call: one function
+    narrated `if n <= 1` at n=4, `return 1` at n=1 and the recursive return at
+    n=2 — three lines each quietly reporting a different frame."""
+    code_lines, markers = parse(RECURSIVE)
+    beats = build_beats(code_lines, markers, trace_run(RECURSIVE, "<rec>"),
+                        every=False)
+    state = {b.highlight: b.state for b in beats}
+    assert state[2]["n"] == "4"            # the outermost call
+    assert state[4]["n"] == "4"            # ...and so is the recursive return
+    # the base case only ever runs deeper, so it honestly reports that depth
+    assert state[3]["n"] == "1"
+
+
+def test_exec_order_replays_each_recursion_depth():
+    """Same narration text, one beat per depth, each with its own {n}."""
+    code_lines, markers = parse(RECURSIVE)
+    beats = build_beats(code_lines, markers,
+                        trace_run(RECURSIVE, "<rec>", entries=True),
+                        every=False, order=sc.ORDER_EXEC)
+    said = [b.narration for b in beats if b.narration]
+
+    assert [n for n in ("base case, n is 4", "base case, n is 3",
+                        "base case, n is 2", "base case, n is 1")
+            if n in said] == ["base case, n is 4", "base case, n is 3",
+                              "base case, n is 2", "base case, n is 1"]
+    # the recursive return completes on the way back OUT, innermost first
+    unwind = [s for s in said if s.startswith("recurse with")]
+    assert unwind == ["recurse with n=2", "recurse with n=3", "recurse with n=4"]
+
+
+def test_exec_order_does_not_multiply_repeated_calls_or_loops():
+    """Only DEPTH multiplies. A helper called twice, or a loop body, is one
+    beat — otherwise every call site would replay the callee."""
+    src = ("def helper(v):     #: the helper\n"
+           "    return v * 2   #: doubles it\n"
+           "a = helper(1)      #: first call\n"
+           "b = helper(2)      #: second call\n"
+           "for i in range(3): #: a loop\n"
+           "    a = a + i      #: loop body\n")
+    code_lines, markers = parse(src)
+    beats = build_beats(code_lines, markers, trace_run(src, "<n>", entries=True),
+                        every=False, order=sc.ORDER_EXEC)
+    said = [b.narration for b in beats if b.narration]
+    assert said.count("doubles it") == 1
+    assert said.count("loop body") == 1
+
+
 def test_exec_order_reports_narration_it_had_to_drop(capsys):
     """Silently losing half a snippet's commentary reads as a tool bug rather
     than what it is — an untaken branch, or a snippet that raised part-way."""

@@ -206,6 +206,35 @@ instant the writing pass stops). That in-loop guard is what keeps the seam
 gap the only clip in that seam — and what keeps a pause from ever landing
 after the video's final beat.
 
+#### Recursion
+
+`Step.depth` is the call depth inside the traced file — module level 0, a
+function it calls 1, that function calling itself 2 — and it is what makes a
+recursive snippet legible. Without it the model has no notion of stack depth
+at all, and both orders quietly mixed frames.
+
+- **Source order** ranks candidate steps with `_first_rank()`: a `"call"`
+  step first (parameters on the `def` line), then the SHALLOWEST depth. Steps
+  arrive in completion order and recursion completes inside-out, so "the first
+  step for this line" was the DEEPEST call — `fact(4)` narrated `if n <= 1` at
+  n=4, `return 1` at n=1 and `return n * fact(n-1)` at n=2, three lines of one
+  function each reporting a different frame. Ranking by depth pins the body to
+  the outermost invocation, the one the caller actually made; a line that only
+  ever runs deeper (a base case) still reports the shallowest depth it
+  reaches, which is the truth about it.
+- **`--order exec`** keys its visit dedup on `(line, kind, depth)`, so each
+  depth is its own beat with its own locals — the same `#:` text replayed with
+  a different `{n}` each time, descending and then unwinding. Repetition at the
+  SAME depth still collapses to the first, so a helper called twice, or a loop
+  body, stays one beat: only recursion multiplies.
+
+`Step.frame_id` is a **monotonic ordinal**, not `id(frame)`. CPython recycles
+a frame's id once it is freed, so two sequential calls to the same function
+could compare equal and be read as one scope — which `--every`'s loop-exit
+suppression (invariant 4) matches on. The ordinal is assigned on the `call`
+event and dropped on `return`, so the id→ordinal map is only ever consulted
+while that exact frame is alive.
+
 #### Execution order (`--order exec`, first-exec only)
 
 `--order {source,exec}` (`SNIPPET_CAST_ORDER`, `build(order=...)`) is the

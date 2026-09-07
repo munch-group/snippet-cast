@@ -196,6 +196,7 @@ import ast
 import contextlib
 import functools
 import io
+import itertools
 import json
 import math
 import os
@@ -569,7 +570,16 @@ class Step:
     line_no: int
     disp: dict          # {name: repr-string, truncated}  -> panel
     text: dict          # {name: str(value)}              -> interpolation
-    frame_id: int       # id() of the frame, to find the next step in same scope
+    frame_id: int       # which frame instance, to find the next step in the same
+                        # scope. A monotonic ordinal, NOT id(frame): CPython
+                        # reuses the id of a frame once it is freed, so two
+                        # sequential calls to the same function could compare
+                        # equal and be treated as one scope.
+    depth: int = 0      # call depth inside the traced file — module level is 0,
+                        # a function it calls is 1, that function calling itself
+                        # is 2. This is what makes recursion legible: a line at
+                        # depth 3 is a different visit from the same line at
+                        # depth 1, with its own locals.
     kind: str = "done"  # which visit of the line this is:
                         #   "done"  — the line has finished running; its
                         #             post-state (invariant 3). The only kind
@@ -636,12 +646,24 @@ def trace_run(source, filename, entries=False):
         return []
     steps = []
     pending = {}   # id(frame) -> lineno awaiting its post-state snapshot
+    # id(frame) -> (ordinal, depth), while that frame is alive. Dropped on
+    # return, which is what keeps the id->ordinal mapping honest: an id is
+    # unique only for as long as its frame exists.
+    frames = {}
+    counter = itertools.count()
+
+    def frame_info(frame):
+        key = id(frame)
+        if key not in frames:
+            frames[key] = (next(counter), len(frames))
+        return frames[key]
 
     def close(frame):
         L = pending.get(id(frame))
         if L is not None:
             disp, text = _snapshot(frame)
-            steps.append(Step(L, disp, text, id(frame)))
+            no, depth = frame_info(frame)
+            steps.append(Step(L, disp, text, no, depth=depth))
 
     def tracer(frame, event, arg):
         if frame.f_code.co_filename != filename:
@@ -654,20 +676,23 @@ def trace_run(source, filename, entries=False):
             # no parameters in it at all). co_name filters out frames with no
             # `def` line of their own: "<module>", "<listcomp>", "<genexpr>",
             # "<dictcomp>", "<lambda>".
+            no, depth = frame_info(frame)
             if not frame.f_code.co_name.startswith("<"):
                 disp, text = _snapshot(frame)
                 steps.append(Step(frame.f_code.co_firstlineno, disp, text,
-                                  id(frame), kind="call"))
+                                  no, kind="call", depth=depth))
         elif event == "line":
             close(frame)          # the previous line in this frame just finished
+            no, depth = frame_info(frame)
             if entries:
                 disp, text = _snapshot(frame)
-                steps.append(Step(frame.f_lineno, disp, text, id(frame),
-                                  kind="enter"))
+                steps.append(Step(frame.f_lineno, disp, text, no,
+                                  kind="enter", depth=depth))
             pending[id(frame)] = frame.f_lineno
         elif event == "return":
             close(frame)
             pending.pop(id(frame), None)
+            frames.pop(id(frame), None)   # the id becomes reusable now
         return tracer
 
     glb = {"__name__": "__main__", "__file__": filename}
@@ -1141,10 +1166,16 @@ def _exec_beats(code_lines, markers, steps):
     comment_marks = [m for m in markers if not m.has_code]
 
     # First visit of each (line, kind), in time order.
+    # Keyed on DEPTH as well as line and kind, which is what makes recursion
+    # legible: `fact` at depth 3 is a genuinely different visit from `fact` at
+    # depth 1, with its own locals, so each gets its own beat and its own
+    # {n}. Repetition at the SAME depth still collapses to the first — a
+    # helper called in a loop, or a loop body — so only recursion multiplies.
     visits, seen = [], set()
     for st in steps:
-        if st.line_no in code_marks and (st.line_no, st.kind) not in seen:
-            seen.add((st.line_no, st.kind))
+        key = (st.line_no, st.kind, st.depth)
+        if st.line_no in code_marks and key not in seen:
+            seen.add(key)
             visits.append(st)
 
     # Drop an "enter" that its own "done" follows immediately with nothing
@@ -1159,7 +1190,7 @@ def _exec_beats(code_lines, markers, steps):
         nxt = visits[i + 1] if i + 1 < len(visits) else None
         redundant = (st.kind == "enter" and nxt is not None
                      and nxt.kind == "done" and nxt.line_no == st.line_no
-                     and nxt.disp == st.disp
+                     and nxt.depth == st.depth and nxt.disp == st.disp
                      # ...unless the line gives the entry its OWN words, in
                      # which case the two beats differ in what they SAY even
                      # though the panel is identical, and dropping one would
@@ -1230,6 +1261,13 @@ def _exec_beats(code_lines, markers, steps):
     return beats
 
 
+def _first_rank(st):
+    """Sort key for choosing which Step a first-exec beat shows. Lower wins:
+    a "call" step over any other (parameters on the `def` line), then the
+    shallowest recursion depth."""
+    return (0 if st.kind == "call" else 1, st.depth)
+
+
 def build_beats(code_lines, markers, steps, every, loop_ranges=None,
                 order=ORDER_SOURCE):
     loop_ranges = loop_ranges or {}
@@ -1256,13 +1294,25 @@ def build_beats(code_lines, markers, steps, every, loop_ranges=None,
         first = {}  # line_no -> the Step whose state that line's beat shows
         for st in steps:
             prev = first.get(st.line_no)
+            # Two preferences, in order.
+            #
             # A `def` line has two steps: executing the def STATEMENT (module
             # scope, no parameters) and entering the call (the parameters as
             # bound). Prefer the latter, so highlighting `def f(n):` shows
             # `n = 7` instead of an empty panel — the def statement's own
-            # post-state is never what a walkthrough is talking about. First
-            # call wins, so a second call can't overwrite it.
-            if prev is None or (st.kind == "call" and prev.kind != "call"):
+            # post-state is never what a walkthrough is talking about.
+            #
+            # Then prefer the SHALLOWEST call. Steps arrive in completion
+            # order, and a recursive function completes inside-out, so "the
+            # first step for this line" is the DEEPEST call: `fact(4)` used to
+            # narrate `if n <= 1` at n=4, `return 1` at n=1 and
+            # `return n * fact(n-1)` at n=2 — three lines of one function,
+            # each quietly reporting a different stack frame. Ranking by depth
+            # pins the whole body to the outermost invocation, the one the
+            # caller actually made. A line that only ever runs deeper (a base
+            # case) still reports the shallowest depth it reaches, which is
+            # the truth about it.
+            if prev is None or _first_rank(st) < _first_rank(prev):
                 first[st.line_no] = st
         groups = _reveal_groups(code_lines, markers)
         beats = []
