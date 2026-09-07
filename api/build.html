@@ -238,7 +238,8 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>    font_size<span class="op">=</span><span class="va">None</span>,</span>
 <span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a>    screenflow<span class="op">=</span><span class="va">None</span>,</span>
 <span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a>    quiet<span class="op">=</span><span class="va">False</span>,</span>
-<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a>    order<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <p>Render an annotated Python snippet into a narrated screencast video.</p>
 <p>Parses <code>source_path</code> for trailing <code>#:</code> narration comments, optionally executes it to capture a per-line variable state, and assembles one still-frame-plus-narration clip per beat into <code>out_path</code> with ffmpeg.</p>
 <section id="parameters" class="level2 doc-section doc-section-parameters">
@@ -294,7 +295,11 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </dd>
 <dt><code><span class="parameter-name"><strong>quiet</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">False</span></code></dt>
 <dd>
-<p>Suppress every progress line, note and trace warning — and whatever the snippet itself prints while being traced. Errors are NOT suppressed: they still raise/<code>sys.exit</code> to stderr, so a quiet run that fails can’t be mistaken for one that succeeded.</p>
+<p>Suppress every progress line and <code>"note: ..."</code> — and whatever the snippet itself prints while being traced. What survives is failure: the <code>"! ..."</code> lines for a snippet that won’t compile or raised part-way (stderr, via <code>_warn()</code>) and errors, which still raise/<code>sys.exit</code>. So a quiet run that fails can’t be mistaken for a clean one. Both front ends default this to True (<code>-v</code>/<code>--verbose</code> turns the chatter back on); the default here is False, so a library caller keeps the output it has always had unless it asks otherwise.</p>
+</dd>
+<dt><code><span class="parameter-name"><strong>order</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">None</span></code></dt>
+<dd>
+<p>Playback order of the narrated lines: <code>ORDER_SOURCE</code> (top to bottom, or the <code>"N) "</code> order the file gives) or <code>ORDER_EXEC</code> (the order Python visits them — see <code>_exec_beats()</code>). None, the default, means <code>ORDER</code> (currently <code>ORDER_EXEC</code>) wherever it applies and <code>ORDER_SOURCE</code> wherever it can’t: with <code>trace=False</code>, <code>every=True</code>, an <code>"N) "</code>-numbered file, or an unnarrated <code>allow_unnarrated</code> render. Passing <code>ORDER_EXEC</code> explicitly makes each of those an error instead.</p>
 </dd>
 <dt><code><span class="parameter-name"><strong>manual_audio_dir</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">None</span></code></dt>
 <dd>
@@ -314,7 +319,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </dd>
 <dt><code><span class="parameter-name"><strong>state_fg_color</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">None</span></code></dt>
 <dd>
-<p><code>"#rrggbb"</code> for ALL of the state panel’s text — variable names and values both — with the “STATE” header blended <code>HEADER_DIM</code> toward the panel background so it stays subordinate. <code>None</code> keeps the default three-color scheme (<code>COL_NAME</code>/<code>COL_VALUE</code>/<code>COL_HEADER</code>), which is also where to go for finer control than one color gives.</p>
+<p><code>"#rrggbb"</code> for ALL of the state panel’s text — variable names and values both. <code>None</code> keeps the default two-color scheme (<code>COL_NAME</code>/<code>COL_VALUE</code>), which is also where to go for finer control than one color gives.</p>
 </dd>
 <dt><code><span class="parameter-name"><strong>bg_color</strong></span> <span class="parameter-annotation-sep">:</span> <span class="parameter-annotation"></span> <span class="parameter-default-sep">=</span> <span class="parameter-default">_USE_DEFAULT</span></code></dt>
 <dd>
