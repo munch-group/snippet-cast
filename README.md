@@ -79,12 +79,20 @@ via the microphone) backends, plus configuring Piper (local) and ElevenLabs
 ## Configuration
 
 `-o`/`--output` sets an explicit path; without it, `-n`/`--name` (default
-`out`) and `-d`/`--output-dir` (default `.`, created if missing) build one as
-`output-dir/name.mp4`:
+`out`) and `-d`/`--output-dir` (default `.snippet-cast`, created if missing)
+build one as `output-dir/name.mp4`:
 
 ```bash
+snippet-cast snippet.py --tts silent                        # -> ./.snippet-cast/out.mp4
+snippet-cast snippet.py --tts silent -n intro               # -> ./.snippet-cast/intro.mp4
 snippet-cast snippet.py --tts silent -n intro -d ./videos   # -> ./videos/intro.mp4
 ```
+
+`.snippet-cast/` is a hidden directory beside your work that ignores itself in
+git, so renders don't scatter `out.mp4` through your folder or your history.
+`%%snippet-cast` cells write there too (under a name hashed from the cell), so
+both front ends keep their videos in one place. `-d .` puts them back in the
+current directory.
 
 Every option (except `-o`/`--output`) also has a `SNIPPET_CAST_<NAME>`
 environment variable default — an explicit flag always wins over its env

@@ -513,13 +513,20 @@ def test_cell_magic_writes_into_the_cache_dir_by_default(ip, tmp_path, monkeypat
     assert not list(tmp_path.glob("*.mp4"))
 
 
-@pytest.mark.parametrize("flag", ["-o mine.mp4", "-n mine", "-d subdir"])
-def test_explicit_output_still_bypasses_the_cache_dir(ip, tmp_path, monkeypatch, flag):
+@pytest.mark.parametrize("flag,expected", [
+    ("-o mine.mp4", "mine.mp4"),
+    ("-n mine", f"{sc_magic.CACHE_DIR}/mine.mp4"),
+    ("-d subdir", "subdir/out.mp4"),
+])
+def test_explicit_output_still_bypasses_the_hashed_name(ip, tmp_path, monkeypatch,
+                                                        flag, expected):
+    """-o/-n/-d name the file; only a cell that said nothing gets the hash.
+    -n alone still lands in the default output directory (which IS the cache
+    directory), so the two front ends agree on where a video goes."""
     monkeypatch.chdir(tmp_path)
     ip.run_cell(f"%%snippet-cast --tts silent -q {flag}\nx = 1  #: one\n")
 
-    assert list(tmp_path.glob("**/*.mp4"))                 # something was written
-    assert not (tmp_path / sc_magic.CACHE_DIR).exists()    # but not in the cache
+    assert [str(p.relative_to(tmp_path)) for p in tmp_path.glob("**/*.mp4")] == [expected]
 
 
 def test_env_vars_set_to_their_defaults_express_no_preference(ip, tmp_path, monkeypatch):
@@ -532,7 +539,7 @@ def test_env_vars_set_to_their_defaults_express_no_preference(ip, tmp_path, monk
     monkeypatch.chdir(tmp_path)
     for k, v in (("SNIPPET_CAST_MANUAL_AUDIO_DIR", "./manual_audio"),
                  ("SNIPPET_CAST_NAME", "out"),
-                 ("SNIPPET_CAST_OUTPUT_DIR", "."),
+                 ("SNIPPET_CAST_OUTPUT_DIR", sc_magic.OUTPUT_DIR_DEFAULT),
                  ("SNIPPET_CAST_SCREENFLOW", "none"),
                  ("SNIPPET_CAST_LIGHT_CONTROLS", "auto"),
                  ("SNIPPET_CAST_TTS", "silent")):
@@ -558,7 +565,19 @@ def test_output_env_vars_also_count_as_explicit(ip, tmp_path, monkeypatch):
     monkeypatch.setenv("SNIPPET_CAST_NAME", "fromenv")   # differs from "out"
     ip.run_cell("%%snippet-cast --tts silent -q\nx = 1  #: one\n")
 
-    assert (tmp_path / "fromenv.mp4").exists()
+    # The name it asked for, in the default output directory — not the hash.
+    assert [p.name for p in (tmp_path / sc_magic.CACHE_DIR).glob("*.mp4")] == ["fromenv.mp4"]
+
+
+def test_output_dir_env_var_can_still_ask_for_the_notebook_folder(ip, tmp_path,
+                                                                  monkeypatch):
+    """'.' used to be the default, and so meant nothing; now it is a genuine
+    request to put the video next to the notebook."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNIPPET_CAST_OUTPUT_DIR", ".")
+    ip.run_cell("%%snippet-cast --tts silent -q\nx = 1  #: one\n")
+
+    assert (tmp_path / "out.mp4").exists()
     assert not (tmp_path / sc_magic.CACHE_DIR).exists()
 
 

@@ -889,11 +889,34 @@ the same machinery (fallback `False`, env `SNIPPET_CAST_VERBOSE`) and then
 folded into `quiet` by hand — it is not an independent setting, just the
 readable spelling of `--no-quiet` now that `--quiet` defaults to on.
 
-`-n/--name` (default `"out"`) and `-d/--output-dir` (default `.`, created if
-missing) build the output path as `output_dir/name.mp4` via
-`resolve_output_path()`; `-o/--output`, if given, overrides both outright and
-has no env var of its own (SNIPPET_CAST_OUTPUT_DIR + SNIPPET_CAST_NAME
-already cover the "change my default output location" case without one).
+`-n/--name` (default `"out"`) and `-d/--output-dir` (default
+`OUTPUT_DIR_DEFAULT`, i.e. `.snippet-cast`, created if missing) build the
+output path as `output_dir/name.mp4` via `resolve_output_path()`;
+`-o/--output`, if given, overrides both outright and has no env var of its own
+(SNIPPET_CAST_OUTPUT_DIR + SNIPPET_CAST_NAME already cover the "change my
+default output location" case without one).
+
+**`OUTPUT_DIR_DEFAULT` IS `magic.CACHE_DIR`** — one directory, not two that
+happen to match. A plain `snippet-cast x.py` writes `.snippet-cast/out.mp4`
+and a defaulted `%%snippet-cast` cell writes `.snippet-cast/<hash>.mp4`, so
+only the FILE NAME differs between the front ends and neither strews videos
+through the user's own folder. `resolve_output_path()` drops the same
+self-ignoring `.gitignore` the cell magic always did, via the shared
+`mark_generated_dir()` — which is keyed on the directory being *named*
+`OUTPUT_DIR_DEFAULT`, so an explicit `-d videos` is left alone (that is the
+user's own directory; silently teaching git to ignore everything in it would
+be a surprise).
+
+Two consequences of the default moving off `.`. `-n mine` in a notebook now
+lands in `.snippet-cast/mine.mp4` rather than beside the notebook — it still
+bypasses the hash, which is all `output_explicit` was ever about. And
+`magic.py`'s "an env var at its default expresses no preference" check must
+compare against `OUTPUT_DIR_DEFAULT`, not `"."`: left comparing to `"."`, an
+activation env materialising `SNIPPET_CAST_OUTPUT_DIR=.snippet-cast` would
+read as explicit and put every cell back to overwriting one `out.mp4` —
+exactly the bug that check exists to prevent. Conversely
+`SNIPPET_CAST_OUTPUT_DIR=.` is now a genuine request for the notebook's own
+folder, where it used to mean nothing.
 
 ### Verifying changes
 
@@ -1305,7 +1328,9 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
 - **Where a cell's video goes (cell magic ONLY):** with no `-o`/`-n`/`-d` (or
   their env vars), `_cell_output_path()` writes to
   `CACHE_DIR/<12-hex hash of the cell>.mp4` — `.snippet-cast/`, beside the
-  notebook. Two problems, one fix. Every cell used to default to `out.mp4`,
+  notebook. `CACHE_DIR` **is** `screencast.OUTPUT_DIR_DEFAULT`, the same
+  directory a plain CLI run defaults into; only the file name is cell-magic
+  specific. Two problems, one fix. Every cell used to default to `out.mp4`,
   so in a notebook of N defaulted cells the first N-1 videos were silently
   OVERWRITTEN by the last (`docs/pages/example.ipynb` had 6 cells writing
   `out.mp4`, 3 writing `hello.mp4`, 2 writing `fibster.mp4`); and a student

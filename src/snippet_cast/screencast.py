@@ -304,6 +304,13 @@ ENTRY_SEP = "/"         # splits ONE pass's narration into "entry / completion",
 PART2_EMPTY_HOLD = 0.8  # seconds to hold a walkthrough-pass beat with no narration
 PAUSE_DEFAULT = 0.8     # default seconds of silence held on each beat after its narration
 MANUAL_AUDIO_DIR_DEFAULT = "./manual_audio"  # default --manual-audio-dir for CLI/notebook
+OUTPUT_DIR_DEFAULT = ".snippet-cast"  # default -d/--output-dir: a hidden, self-ignoring
+                        # directory beside the input rather than the user's own folder, so a
+                        # run leaves one tidy directory instead of out.mp4 next to their work.
+                        # The cell magic's hashed per-cell videos land here too (magic.CACHE_DIR
+                        # IS this constant), so CLI and notebook share one output directory.
+                        # Relative on purpose — an absolute path is not servable by a notebook
+                        # front end and is not copied by Quarto (see magic.CACHE_DIR).
 PAUSE_MARKER_RE = re.compile(r"(\.{2,})")  # 2+ consecutive periods in narration = an inline pause
 PAUSE_PER_PERIOD = 0.1  # seconds of silence per "." in a PAUSE_MARKER_RE run (".."->0.2s, "...."->0.4s)
 SAY_PAUSE_MS_PER_PERIOD = 200  # ms per "." for the say backend's native [[slnc]] markup (see
@@ -3598,11 +3605,30 @@ def resolve_panel_args(state_bg_color, state_fg_color):
                            "to keep the default panel text colors"))
 
 
+def mark_generated_dir(directory):
+    """Drop a self-ignoring `.gitignore` into OUR OWN output directory, so the
+    generated videos stay out of the user's git history without them having to
+    remember an entry for them.
+
+    Deliberately keyed on the directory being named OUTPUT_DIR_DEFAULT: an
+    explicit `-d videos` is the user's own directory, and silently teaching git
+    to ignore everything in it would be a surprise. Shared with magic.py, which
+    writes its hashed per-cell videos into that same directory."""
+    if os.path.basename(os.path.normpath(directory)) != OUTPUT_DIR_DEFAULT:
+        return
+    marker = os.path.join(directory, ".gitignore")
+    if not os.path.exists(marker):
+        with open(marker, "w") as fh:
+            fh.write("*\n")
+
+
 def resolve_output_path(output, output_dir, name):
     """The `-o/--output` path if given, else `output_dir/name.mp4` — and
     makes sure the destination directory exists."""
     out_path = output if output is not None else os.path.join(output_dir, f"{name}.mp4")
-    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    out_dir = os.path.dirname(out_path) or "."
+    os.makedirs(out_dir, exist_ok=True)
+    mark_generated_dir(out_dir)
     return out_path
 
 
@@ -3619,8 +3645,8 @@ def main():
                          "[default: out; env: SNIPPET_CAST_NAME]")
     ap.add_argument("-d", "--output-dir", default=None, metavar="DIR",
                     help="directory for the output file when -o/--output isn't "
-                         "given (created if missing) [default: current "
-                         "directory; env: SNIPPET_CAST_OUTPUT_DIR]")
+                         f"given (created if missing) [default: {OUTPUT_DIR_DEFAULT}; "
+                         "env: SNIPPET_CAST_OUTPUT_DIR]")
     ap.add_argument("--tts", choices=list(BACKENDS), default=None,
                     help="TTS backend [default: say; env: SNIPPET_CAST_TTS] "
                          "(--record implies manual; passing --tts explicitly "
@@ -3792,7 +3818,7 @@ def main():
         typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT, export_script=False,
         manual_audio_dir=MANUAL_AUDIO_DIR_DEFAULT, record=False, no_frame=False,
         quiet=True, verbose=False, order=None,
-        name="out", output_dir=".", style=STYLE,
+        name="out", output_dir=OUTPUT_DIR_DEFAULT, style=STYLE,
         bg_color=BG_COLOR if BG_COLOR else BG_COLOR_NONE,
         state_bg_color=PANEL_BG, state_fg_color=None,
         highlight_color=HIGHLIGHT_COLOR, font_size=FONT_SIZE, screenflow=None)

@@ -78,12 +78,14 @@ from .screencast import (
     ORDER,
     ORDER_EXEC,
     ORDER_SOURCE,
+    OUTPUT_DIR_DEFAULT,
     PANEL_BG,
     PAUSE_DEFAULT,
     STYLE,
     TYPE_SPEED,
     build,
     export_script,
+    mark_generated_dir,
     record_narration,
     resolve_env_defaults,
     resolve_output_path,
@@ -286,7 +288,12 @@ def _video(out_path, embed, responsive, light_controls=False):
 # not servable by a notebook front end and is not copied by Quarto, so the
 # video would render as a 300x150 black box. Verified that Quarto's resource
 # globbing does reach into a dot directory.
-CACHE_DIR = ".snippet-cast"
+#
+# It IS OUTPUT_DIR_DEFAULT, not a second directory that happens to match: a
+# cell naming its video with -n lands beside the hashed ones, and so does a
+# plain `snippet-cast` run from the terminal. Only the FILE NAME differs
+# between the two — hashed here, `-n`/`out` there.
+CACHE_DIR = OUTPUT_DIR_DEFAULT
 
 # Quarto reads its per-cell options from `#|` comments at the top of a cell
 # (`#| fig-column: margin`, `#| echo: false`, ...). They are directives to the
@@ -336,11 +343,8 @@ def _cell_output_path(line, cell):
     digest = hashlib.sha256((line + "\n" + cell).encode("utf-8")).hexdigest()[:12]
     os.makedirs(CACHE_DIR, exist_ok=True)
     # Keep the directory out of the student's git history without asking them
-    # to remember a .gitignore entry.
-    marker = os.path.join(CACHE_DIR, ".gitignore")
-    if not os.path.exists(marker):
-        with open(marker, "w") as fh:
-            fh.write("*\n")
+    # to remember a .gitignore entry (shared with resolve_output_path()).
+    mark_generated_dir(CACHE_DIR)
     return os.path.join(CACHE_DIR, f"{digest}.mp4")
 
 
@@ -358,7 +362,7 @@ class SnippetCastMagics(Magics):
                    "[default: out; env: SNIPPET_CAST_NAME]")
     @argument("-d", "--output-dir", default=None, metavar="DIR",
               help="directory for the output file when -o/--output isn't "
-                   "given (created if missing) [default: current directory; "
+                   f"given (created if missing) [default: {OUTPUT_DIR_DEFAULT}; "
                    "env: SNIPPET_CAST_OUTPUT_DIR]")
     @argument("--tts", choices=list(BACKENDS), default=None,
               help="TTS backend [default: say — macOS only, so pass "
@@ -549,13 +553,14 @@ class SnippetCastMagics(Magics):
         output_explicit = (
             any(v is not None for v in (args.output, args.name, args.output_dir))
             or os.environ.get("SNIPPET_CAST_NAME", "out") != "out"
-            or os.environ.get("SNIPPET_CAST_OUTPUT_DIR", ".") != ".")
+            or os.environ.get("SNIPPET_CAST_OUTPUT_DIR",
+                              OUTPUT_DIR_DEFAULT) != OUTPUT_DIR_DEFAULT)
         resolve_env_defaults(
             args, tts="say", no_trace=False, every=False, subtitles=False,
             typing=False, typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT, export_script=False,
             manual_audio_dir=MANUAL_AUDIO_DIR_DEFAULT, record=False, no_frame=False,
             quiet=True, verbose=False, responsive=True, order=None,
-            name="out", output_dir=".", style=STYLE,
+            name="out", output_dir=OUTPUT_DIR_DEFAULT, style=STYLE,
             bg_color=BG_COLOR if BG_COLOR else BG_COLOR_NONE,
             state_bg_color=PANEL_BG, state_fg_color=None,
             highlight_color=HIGHLIGHT_COLOR, font_size=FONT_SIZE,

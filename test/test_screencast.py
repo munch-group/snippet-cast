@@ -1572,6 +1572,39 @@ def test_resolve_output_path_builds_from_dir_and_name_and_creates_dir(tmp_path):
     path = resolve_output_path(None, str(out_dir), "myvideo")
     assert path == str(out_dir / "myvideo.mp4")
     assert out_dir.is_dir()  # created even though nothing was rendered yet
+    # A directory the user named is theirs — don't teach git to ignore it.
+    assert not (out_dir / ".gitignore").exists()
+
+
+def test_main_defaults_the_output_into_the_snippet_cast_dir(tmp_path, monkeypatch):
+    """With no -o/-n/-d, the video lands in .snippet-cast/out.mp4 beside the
+    user's work rather than as out.mp4 in the middle of it."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sc, "_QUIET", sc._QUIET)   # main() sets it; restore after
+    seen = []
+    monkeypatch.setattr(sc, "build", lambda src, out_path, tts, **kw: seen.append(out_path))
+    monkeypatch.setattr(sys, "argv", ["snippet-cast", str(FIB), "--tts", "silent"])
+
+    sc.main()
+
+    assert seen == [os.path.join(sc.OUTPUT_DIR_DEFAULT, "out.mp4")]
+    # ...and the directory it made ignores itself, so the videos stay out of git.
+    assert (tmp_path / sc.OUTPUT_DIR_DEFAULT / ".gitignore").read_text().strip() == "*"
+
+
+def test_main_output_dir_still_overrides_the_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sc, "_QUIET", sc._QUIET)   # main() sets it; restore after
+    seen = []
+    monkeypatch.setattr(sc, "build", lambda src, out_path, tts, **kw: seen.append(out_path))
+    monkeypatch.setattr(sys, "argv",
+                        ["snippet-cast", str(FIB), "--tts", "silent",
+                         "-d", "videos", "-n", "intro"])
+
+    sc.main()
+
+    assert seen == [os.path.join("videos", "intro.mp4")]
+    assert not (tmp_path / sc.OUTPUT_DIR_DEFAULT).exists()
 
 
 @pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
