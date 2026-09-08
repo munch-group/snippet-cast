@@ -57,8 +57,11 @@ SNIPPET_CAST_STYLE=nord pixi run snippet-cast test/data/fib.py -o out.mp4 --tts 
 pixi run snippet-cast test/data/fib.py  -o out.mp4 --tts piper
 pixi run snippet-cast test/data/fib.py  -o out.mp4 --tts elevenlabs
 
-# programmatic use
+# programmatic use — build() takes a path, video() takes the snippet as a
+# string and returns the video to display (for a Quarto cell, whose first
+# lines have to be its own '#|' directives rather than %%snippet-cast)
 python -c "from snippet_cast import build; build('test/data/fib.py', 'out.mp4', tts='silent')"
+python -c "from snippet_cast import video; video(open('test/data/fib.py').read(), tts='silent')"
 
 # smoke-verify an output
 ffprobe -v error -show_entries format=duration \
@@ -76,8 +79,8 @@ manual recipe used to sanity-check rendered video output.
 | Path | Purpose |
 |---|---|
 | `src/snippet_cast/screencast.py` | The entire tool (~700 lines): parse → trace → beats → render → TTS → assemble. |
-| `src/snippet_cast/__init__.py` | Public API: exports `build` (programmatic), `export_script`, `record_narration`, and `main` (CLI entry point). |
-| `src/snippet_cast/magic.py` | Jupyter `%%snippet-cast` cell magic (`pip install snippet-cast[jupyter]`; both `import snippet_cast` and `import snippet_cast.magic` auto-register it inside a live kernel, or use `%load_ext snippet_cast.magic`). `__init__.py` only imports it conditionally — behind the same `get_ipython()`-gated check `magic.py` itself uses — so `import snippet_cast` outside a live kernel, or without IPython installed, still never requires IPython. It's a thin wrapper: writes the cell to a temp `.py` file, calls `build()`/`export_script()`/`record_narration()`, displays the result with `IPython.display.Video`. `--record`'s `input()` prompts work the same in a notebook cell as a terminal — no special-casing needed. Its option defaults now match the CLI's exactly (`--tts say`, `--order exec`, quiet with `-v` to opt back in) — the historical "`--tts` defaults to `silent` in a notebook" difference is gone, so a non-macOS notebook needs `--tts silent` or `SNIPPET_CAST_TTS` set once. |
+| `src/snippet_cast/__init__.py` | Public API: exports `build` (programmatic), `export_script`, `record_narration`, `main` (CLI entry point), and — lazily, via a PEP 562 `__getattr__` so IPython stays optional — `video` (the notebook front end, defined in `magic.py`). |
+| `src/snippet_cast/magic.py` | The notebook front end: the `%%snippet-cast` cell magic AND the public `video(code, ...)` function it shares its option resolution with (`_resolve_render_options`/`_resolve_output_path`). Cell magic (`pip install snippet-cast[jupyter]`; both `import snippet_cast` and `import snippet_cast.magic` auto-register it inside a live kernel, or use `%load_ext snippet_cast.magic`). `__init__.py` only imports it conditionally — behind the same `get_ipython()`-gated check `magic.py` itself uses — so `import snippet_cast` outside a live kernel, or without IPython installed, still never requires IPython. It's a thin wrapper: writes the cell to a temp `.py` file, calls `build()`/`export_script()`/`record_narration()`, displays the result with `IPython.display.Video`. `--record`'s `input()` prompts work the same in a notebook cell as a terminal — no special-casing needed. Its option defaults now match the CLI's exactly (`--tts say`, `--order exec`, quiet with `-v` to opt back in) — the historical "`--tts` defaults to `silent` in a notebook" difference is gone, so a non-macOS notebook needs `--tts silent` or `SNIPPET_CAST_TTS` set once. |
 | `SETUP.md` | How to configure every TTS backend (`say`, `manual`/`--record`, Piper, ElevenLabs). |
 | `test/data/fib.py`, `test/data/loop.py`, `test/data/twopass.py`, `test/data/footnote.py`, `test/data/plain.py` | Sample snippets used by tests and for manual verification (`twopass.py` exercises `/`-split, two-pass narration; `footnote.py` exercises `#: N)` footnote bodies; `plain.py` carries NO narration at all, for the `--pause`-only silent render). |
 | `test/test_screencast.py` | Automated tests: parsing, tracing, beat construction, and a full-render smoke test. |
@@ -1500,6 +1503,52 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
   keep/record/delete/abort control flow is unit-testable without real audio
   hardware — extend that pattern rather than inlining new I/O calls directly
   into `record_narration()`'s loop.
+- **`snippet_cast.video(code, ...)` — the cell magic as a function (magic.py):**
+  renders an annotated snippet STRING and returns the `HTML` to display.
+  It exists because `%%snippet-cast` and Quarto's `#|` directives BOTH have
+  to be a cell's first lines, so they cannot share a cell — a Quarto page
+  therefore has no way to use the magic at all.
+
+  It is a front end, not a library call: it resolves `SNIPPET_CAST_*` env
+  vars, defaults to `--tts say`/`--order exec`/quiet, and displays the
+  result. `build()` remains the library call (a path in, a file out, no env
+  resolution, nothing displayed). Every parameter mirrors the same-named
+  flag, with `trace=` the one rename — it follows `build()` rather than
+  `--no-trace`, so the negated name only exists inside, where
+  `resolve_env_defaults()` needs it to find `SNIPPET_CAST_NO_TRACE`.
+
+  **The two notebook front ends share their whole option-resolution half**,
+  which is the point: `_resolve_render_options(args)` does the explicit-flag
+  capture, the `resolve_env_defaults()` fallback table, the verbose fold, the
+  `--light-controls` tri-state, the style/panel/screenflow validation and the
+  luminance-based glyph color; `_resolve_output_path(args, *hash_parts)` does
+  the `-o`/`-n`/`-d`-or-hash rule. Adding an option in one place now reaches
+  both. `_resolve_render_options()` deliberately does NOT cover the
+  magic-only options (`--export-script`, `--record`, `--no-frame`) or the
+  output ones, and it RAISES `ValueError` carrying the bare message — the
+  magic prefixes `"snippet-cast: "` and prints (a cell must not blow up),
+  while `video()` lets it propagate.
+
+  `video()` also converts `build()`'s `SystemExit` into `ValueError`. A
+  command exits; a function raises — and under `quarto render` a refused
+  snippet must fail loudly rather than quietly produce no video.
+
+  **It is exported lazily**, by a PEP 562 `__getattr__` in `__init__.py`, and
+  that is load-bearing: `video()` returns something to display, so it lives
+  in `magic.py`, the one module allowed to import IPython. A module-level
+  `from .magic import video` in `__init__.py` would drag IPython into every
+  `import snippet_cast` — including a plain script and every CLI run — and
+  defeat the whole `jupyter` extra (see `_register_magic_if_in_notebook()`,
+  which is gated for the same reason). Unlike that function it is NOT gated
+  on a live kernel: registering a cell magic outside one is meaningless,
+  calling `video()` from a script is not. With no IPython installed the name
+  still exists and raises `ImportError` naming the extra, pinned by
+  `test_video_is_public_api_without_requiring_ipython_to_import_the_package`.
+
+  Quarto `#|` lines are NOT stripped from `code` (the magic strips them from
+  a cell body, where the body IS the snippet); here they sit above the call,
+  outside the string. `--record`/`--export-script` have no `video()`
+  equivalent — `record_narration()`/`export_script()` take a path.
 - **Jupyter `%%snippet-cast` cell magic:** lives in `src/snippet_cast/magic.py`
   (`SnippetCastMagics`). `import snippet_cast.magic` auto-registers it when
   run inside a live kernel (module-level `get_ipython()` check calls

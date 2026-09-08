@@ -480,16 +480,16 @@ def test_cell_magic_drops_directives_before_rendering(ip, tmp_path, monkeypatch)
     assert seen["source"] == "x = 1  #: one\n"
 
 
-def test_cell_output_path_is_unique_per_cell_and_stable_across_reruns(tmp_path, monkeypatch):
+def test_hashed_output_path_is_unique_per_cell_and_stable_across_reruns(tmp_path, monkeypatch):
     """Every cell used to default to out.mp4, so in a notebook of N cells the
     first N-1 videos were silently overwritten by the last. Hashing the cell
     fixes that — and, unlike a random name, re-running an unchanged cell
     reuses its file instead of leaving another orphan behind."""
     monkeypatch.chdir(tmp_path)
-    a = sc_magic._cell_output_path("--tts silent", "x = 1  #: one\n")
-    a_again = sc_magic._cell_output_path("--tts silent", "x = 1  #: one\n")
-    b = sc_magic._cell_output_path("--tts silent", "y = 2  #: two\n")
-    c = sc_magic._cell_output_path("--tts silent --typing", "x = 1  #: one\n")
+    a = sc_magic._hashed_output_path("--tts silent", "x = 1  #: one\n")
+    a_again = sc_magic._hashed_output_path("--tts silent", "x = 1  #: one\n")
+    b = sc_magic._hashed_output_path("--tts silent", "y = 2  #: two\n")
+    c = sc_magic._hashed_output_path("--tts silent --typing", "x = 1  #: one\n")
 
     assert a == a_again          # same cell -> same file, no accumulation
     assert a != b                # different body -> different file
@@ -499,7 +499,7 @@ def test_cell_output_path_is_unique_per_cell_and_stable_across_reruns(tmp_path, 
 
 def test_cell_output_dir_ignores_itself_in_git(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    sc_magic._cell_output_path("", "x = 1  #: one\n")
+    sc_magic._hashed_output_path("", "x = 1  #: one\n")
     assert (tmp_path / sc_magic.CACHE_DIR / ".gitignore").read_text().strip() == "*"
 
 
@@ -932,3 +932,211 @@ def test_cell_magic_state_color_env_vars_are_read_per_cell(ip, tmp_path, monkeyp
 
     assert result.success
     assert (seen["state_bg_color"], seen["state_fg_color"]) == ("#222233", "#DCDCAA")
+
+
+# --------------------------------------------------------------------------
+# snippet_cast.video(code, ...) — %%snippet-cast as a plain function call
+# --------------------------------------------------------------------------
+
+VIDEO_CODE = "x = 1  #: one\ny = x + 1  #: two, {y}\n"
+
+
+@pytest.fixture
+def captured_build(monkeypatch):
+    """Record what video()/the cell magic hand to build(), without rendering."""
+    calls = []
+
+    def fake_build(source_path, out_path, tts, **kw):
+        calls.append({"code": Path(source_path).read_text(),
+                      "out_path": out_path, "tts": tts, **kw})
+        Path(out_path).write_bytes(b"fake-mp4")
+
+    monkeypatch.setattr(sc_magic, "build", fake_build)
+    return calls
+
+
+@pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
+def test_video_renders_and_returns_a_displayable(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out = sc_magic.video(VIDEO_CODE, tts="silent", subtitles=True)
+
+    assert type(out).__name__ == "HTML"          # displayable, not a path
+    made = list((tmp_path / sc_magic.CACHE_DIR).glob("*.mp4"))
+    assert len(made) == 1 and made[0].stat().st_size > 0
+    assert made[0].name in out.data              # the page points at it
+    assert not list(tmp_path.glob("*.mp4"))      # nothing in the user's folder
+
+
+def test_video_output_path_is_hashed_and_stable(tmp_path, monkeypatch, captured_build):
+    monkeypatch.chdir(tmp_path)
+    sc_magic.video(VIDEO_CODE, tts="silent")
+    sc_magic.video(VIDEO_CODE, tts="silent")      # unchanged -> same file
+    sc_magic.video("z = 3  #: three\n", tts="silent")
+
+    paths = [c["out_path"] for c in captured_build]
+    assert paths[0] == paths[1] != paths[2]
+    assert all(os.path.dirname(p) == sc_magic.CACHE_DIR for p in paths)
+    assert (tmp_path / sc_magic.CACHE_DIR / ".gitignore").read_text().strip() == "*"
+
+
+@pytest.mark.parametrize("kw,expected", [
+    ({"out": "mine.mp4"}, "mine.mp4"),
+    ({"name": "mine"}, f"{sc_magic.CACHE_DIR}/mine.mp4"),
+    ({"output_dir": "subdir"}, "subdir/out.mp4"),
+])
+def test_video_explicit_output_wins_over_the_hash(tmp_path, monkeypatch,
+                                                  captured_build, kw, expected):
+    monkeypatch.chdir(tmp_path)
+    sc_magic.video(VIDEO_CODE, tts="silent", **kw)
+
+    assert captured_build[0]["out_path"] == expected.replace("/", os.sep)
+
+
+def test_video_defaults_are_the_cell_magics_defaults(ip, tmp_path, monkeypatch,
+                                                     captured_build):
+    """The two notebook front ends share _resolve_render_options(), and this
+    is what pins that: every build() argument must match, or one of them has
+    drifted (the historical 'a notebook defaults --tts to silent' bug)."""
+    monkeypatch.chdir(tmp_path)
+    ip.run_cell(f"%%snippet-cast\n{VIDEO_CODE}")
+    sc_magic.video(VIDEO_CODE)
+
+    from_magic, from_video = captured_build
+    # out_path differs by design (the magic hashes its option line in too).
+    for call in (from_magic, from_video):
+        del call["out_path"]
+    assert from_magic == from_video
+    assert from_video["tts"] == "say" and from_video["quiet"] is True
+    assert from_video["order"] is None      # the sentinel, so exec can step aside
+
+
+def test_video_arguments_beat_env_vars_which_beat_the_defaults(
+        tmp_path, monkeypatch, captured_build):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNIPPET_CAST_TTS", "silent")
+    monkeypatch.setenv("SNIPPET_CAST_SUBTITLES", "1")
+    monkeypatch.setenv("SNIPPET_CAST_FONT_SIZE", "30")
+
+    sc_magic.video(VIDEO_CODE)
+    sc_magic.video(VIDEO_CODE, font_size=44)
+
+    from_env, explicit = captured_build
+    assert from_env["tts"] == "silent"          # env beat the "say" default
+    assert from_env["subtitles"] is True
+    assert from_env["font_size"] == 30
+    assert explicit["font_size"] == 44          # argument beat the env var
+
+
+def test_video_trace_follows_build_not_the_no_trace_flag(tmp_path, monkeypatch,
+                                                         captured_build):
+    """The parameter is build()'s `trace`; the env var is SNIPPET_CAST_NO_TRACE."""
+    monkeypatch.chdir(tmp_path)
+    sc_magic.video(VIDEO_CODE, tts="silent")
+    sc_magic.video(VIDEO_CODE, tts="silent", trace=False)
+    monkeypatch.setenv("SNIPPET_CAST_NO_TRACE", "1")
+    sc_magic.video(VIDEO_CODE, tts="silent")
+    sc_magic.video(VIDEO_CODE, tts="silent", trace=True)
+
+    assert [c["trace"] for c in captured_build] == [True, False, False, True]
+
+
+def test_video_verbose_is_the_inverse_of_quiet(tmp_path, monkeypatch, captured_build):
+    monkeypatch.chdir(tmp_path)
+    sc_magic.video(VIDEO_CODE, tts="silent")
+    sc_magic.video(VIDEO_CODE, tts="silent", verbose=True)
+
+    assert [c["quiet"] for c in captured_build] == [True, False]
+
+
+def test_video_pause_only_opts_an_unnarrated_snippet_in_when_given(
+        tmp_path, monkeypatch, captured_build):
+    """Same rule as the CLI: PAUSE_DEFAULT is > 0, so only asking for a pause
+    may render a snippet with no '#:' at all — a forgotten marker must not."""
+    monkeypatch.chdir(tmp_path)
+    sc_magic.video(VIDEO_CODE, tts="silent")
+    sc_magic.video(VIDEO_CODE, tts="silent", pause=2)
+
+    assert [c["allow_unnarrated"] for c in captured_build] == [False, True]
+
+
+def test_video_light_controls_follow_the_frame_background(tmp_path, monkeypatch,
+                                                          captured_build):
+    monkeypatch.chdir(tmp_path)
+    light_theme = sc_magic.video(VIDEO_CODE, tts="silent")
+    dark_theme = sc_magic.video(VIDEO_CODE, tts="silent", style="monokai")
+    forced = sc_magic.video(VIDEO_CODE, tts="silent", light_controls=True)
+
+    assert "invert(1)" in light_theme.data      # dark glyphs on the light default
+    assert "invert(1)" not in dark_theme.data   # left white on monokai
+    assert "invert(1)" not in forced.data
+
+
+def test_video_is_responsive_by_default(tmp_path, monkeypatch, captured_build):
+    monkeypatch.chdir(tmp_path)
+    assert "max-width:100%" in sc_magic.video(VIDEO_CODE, tts="silent").data
+    assert "max-width:100%" not in sc_magic.video(
+        VIDEO_CODE, tts="silent", responsive=False).data
+
+
+@pytest.mark.parametrize("kw,message", [
+    ({"font_size": 2}, "--font-size must be >="),
+    ({"tts": "bogus"}, "--tts: invalid choice"),
+    ({"style": "no-such-style"}, "--style: unknown style"),
+    ({"bg_color": "blue"}, "--bg-color"),
+    ({"manual_audio_dir": "somewhere"}, "only applies with tts='manual'"),
+])
+def test_video_raises_value_error_for_a_bad_option(tmp_path, monkeypatch,
+                                                   captured_build, kw, message):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError) as excinfo:
+        sc_magic.video(VIDEO_CODE, **kw)
+
+    assert message in str(excinfo.value)
+    assert not captured_build          # refused before anything was rendered
+
+
+def test_video_raises_value_error_when_the_snippet_is_refused(tmp_path, monkeypatch):
+    """build() reports these with sys.exit, which is right for a command and
+    wrong for a function — a Quarto render must fail loudly, not silently
+    produce no video."""
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError) as excinfo:
+        sc_magic.video("x = 1\ny = 2\n", tts="silent")   # no '#:' anywhere
+
+    assert "No narration found" in str(excinfo.value)
+
+
+def test_video_cleans_up_its_temp_file_even_when_the_snippet_is_refused(
+        tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    with pytest.raises(ValueError):
+        sc_magic.video("x = 1\n", tts="silent")
+
+    assert not list(tmp_path.glob("snippet_cast_video_*.py"))
+
+
+def test_video_is_public_api_without_requiring_ipython_to_import_the_package():
+    """`import snippet_cast` must keep working with no IPython installed —
+    that is the whole point of the `jupyter` extra — so video() is resolved
+    lazily by __init__'s __getattr__ and says what to install if it can't be."""
+    assert snippet_cast.video is sc_magic.video
+
+    probe = subprocess.run(
+        [sys.executable, "-c", "\n".join([
+            "import sys",
+            "sys.modules['IPython'] = None",      # every IPython import now fails
+            "import snippet_cast",
+            "assert 'snippet_cast.magic' not in sys.modules, 'magic imported'",
+            "assert 'video' in snippet_cast.__all__",
+            "assert snippet_cast.build",          # the rest of the API still works
+            "try:",
+            "    snippet_cast.video",
+            "except ImportError as e:",
+            "    assert 'snippet-cast[jupyter]' in str(e), e",
+            "else:",
+            "    raise AssertionError('expected ImportError')",
+            "print('ok')"])],
+        capture_output=True, text=True)
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == "ok"

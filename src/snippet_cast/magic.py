@@ -41,6 +41,18 @@ Output is QUIET by default, again as on the CLI: the per-beat commentary and
 every `note:` need `-v`/`--verbose`. Only a snippet that won't compile or
 raises part-way still reports on its own (stderr), along with errors.
 
+When the top of the cell is already spoken for — a Quarto page, where the
+`#|` directives have to be the first lines, and so does `%%snippet-cast` —
+use `video()` instead. It is this same front end as a plain function call,
+taking the snippet as a string and returning the video to display:
+
+    from snippet_cast import video
+
+    video(code, tts="silent", subtitles=True)
+
+Both share `_resolve_render_options()`/`_resolve_output_path()`, so they
+resolve every option identically and cannot drift apart.
+
 Every flag (except -o/--output) also has a `SNIPPET_CAST_<NAME>` environment
 variable default, e.g. `os.environ["SNIPPET_CAST_PAUSE"] = "0.6"` in an
 earlier cell — read fresh on every cell run, so setting one in cell N is
@@ -57,6 +69,7 @@ import html
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
 
 from IPython import get_ipython
 from IPython.core.magic import Magics, line_cell_magic, magics_class
@@ -85,7 +98,6 @@ from .screencast import (
     TYPE_SPEED,
     build,
     export_script,
-    mark_generated_dir,
     record_narration,
     resolve_env_defaults,
     resolve_output_path,
@@ -326,26 +338,255 @@ def _strip_directives(cell):
     return "".join(ln for i, ln in enumerate(lines, start=1) if i not in drop)
 
 
-def _cell_output_path(line, cell):
-    """Default output path for a cell: CACHE_DIR/<hash of the cell>.mp4.
+def _hashed_output_path(*parts):
+    """Default output path for a snippet given no -o/-n/-d of its own:
+    CACHE_DIR/<hash of `parts`>.mp4. The cell magic hashes the magic line AND
+    the cell body; video() hashes the snippet string it was handed.
 
-    Keyed on the cell's own text — the magic line AND the body — rather than a
-    random name, which matters twice over. Two different cells never collide
-    (today every cell defaults to `out.mp4`, so in a notebook of N cells the
-    first N-1 videos are silently overwritten by the last). And re-running an
-    UNCHANGED cell reuses its file instead of leaving another orphan behind,
-    which a random name would do on every single execution — the directory
-    would grow without bound over an afternoon of tweaking narration.
+    Keyed on the snippet's own text rather than a random name, which matters
+    twice over. Two different cells never collide (before this, every cell
+    defaulted to `out.mp4`, so in a notebook of N cells the first N-1 videos
+    were silently overwritten by the last). And re-running an UNCHANGED cell
+    reuses its file instead of leaving another orphan behind, which a random
+    name would do on every single execution — the directory would grow
+    without bound over an afternoon of tweaking narration.
 
     Editing a cell does strand its previous file; the directory is hidden and
     self-ignoring, and nothing can safely tell which files other notebooks in
-    the same folder still reference."""
-    digest = hashlib.sha256((line + "\n" + cell).encode("utf-8")).hexdigest()[:12]
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    # Keep the directory out of the student's git history without asking them
-    # to remember a .gitignore entry (shared with resolve_output_path()).
-    mark_generated_dir(CACHE_DIR)
-    return os.path.join(CACHE_DIR, f"{digest}.mp4")
+    the same folder still reference.
+
+    resolve_output_path() makes the directory and drops the self-ignoring
+    `.gitignore` — CACHE_DIR *is* OUTPUT_DIR_DEFAULT, so a hashed cell video
+    and a plain `snippet-cast` run land in the same place."""
+    digest = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:12]
+    return resolve_output_path(None, CACHE_DIR, digest)
+
+
+def _resolve_output_path(args, *hash_parts):
+    """Where a rendered snippet goes. An explicit -o/-n/-d (or `out=`/`name=`/
+    `output_dir=`) wins, as does a SNIPPET_CAST_NAME/SNIPPET_CAST_OUTPUT_DIR
+    that DIFFERS from the default; otherwise the hashed cache name.
+
+    Env vars count only when they differ from the default because a
+    project-wide activation env (pixi's [tool.pixi.activation.env], a shell
+    profile) may materialise all of SNIPPET_CAST_* at their defaults, and
+    "SNIPPET_CAST_NAME=out" expresses no preference — treating it as one
+    silently put every cell back to overwriting a single out.mp4.
+
+    Must be called BEFORE anything resolves `name`/`output_dir` from the
+    environment: the "did the caller say anything?" test is `is None`, which
+    the resolution step is about to erase. It does that resolution itself."""
+    output_explicit = (
+        any(v is not None for v in (args.output, args.name, args.output_dir))
+        or os.environ.get("SNIPPET_CAST_NAME", "out") != "out"
+        or os.environ.get("SNIPPET_CAST_OUTPUT_DIR",
+                          OUTPUT_DIR_DEFAULT) != OUTPUT_DIR_DEFAULT)
+    resolve_env_defaults(args, name="out", output_dir=OUTPUT_DIR_DEFAULT)
+    if output_explicit:
+        return resolve_output_path(args.output, args.output_dir, args.name)
+    return _hashed_output_path(*hash_parts)
+
+
+def _resolve_render_options(args):
+    """Fill in every SNIPPET_CAST_* default the RENDER options have, validate
+    them, and work out the control-glyph color — the whole option-resolution
+    half of a notebook front end, shared by the `%%snippet-cast` cell magic
+    and `video()` so the two can never drift apart.
+
+    Deliberately does NOT cover the OUTPUT options (-o/-n/-d, see
+    _resolve_output_path) or the magic-only ones (--export-script, --record,
+    --no-frame): a caller that has them resolves them itself.
+
+    Mutates `args` in place and returns the handful of "was this given
+    explicitly, as opposed to defaulted?" answers its callers still need —
+    each one captured here BEFORE resolution erases the None that expresses
+    it. Raises ValueError, carrying the bare message, for every bad value;
+    the cell magic prefixes it with "snippet-cast: " and prints, while
+    video() lets it propagate."""
+    # Captured before resolve_env_defaults fills in the tts/manual_audio_dir/
+    # quiet fallbacks below, so --record can tell an explicit --tts or env var
+    # apart from the hardcoded default it is about to silently override.
+    #
+    # Flag only, deliberately: the check that uses this exists to catch
+    # someone typing "--record --tts say", not to veto --record because a
+    # project-wide activation env happens to name a backend.
+    tts_explicit = args.tts is not None
+    # Same "flag only" rule, and for the same reason: --quiet is ON by default
+    # now, so a bare --record must NOT trip the "recording is interactive"
+    # check — only someone who actually typed -q did the thing it catches.
+    quiet_explicit = args.quiet is not None
+    # Compared against the default, not merely "is it set": a project-wide
+    # activation env may materialise EVERY SNIPPET_CAST_* var at its default
+    # value, and that is not the mistake this check exists to catch — which is
+    # passing an audio directory while forgetting --tts manual. Treating a
+    # default-valued env var as "explicit" made a bare invocation exit here
+    # and render nothing.
+    _env_manual_dir = os.environ.get("SNIPPET_CAST_MANUAL_AUDIO_DIR")
+    manual_dir_explicit = (
+        args.manual_audio_dir is not None
+        or (_env_manual_dir is not None
+            and _env_manual_dir != MANUAL_AUDIO_DIR_DEFAULT))
+    # Same trick for --pause: asking for a specific frame length is what opts
+    # a narration-less snippet into a silent render — PAUSE_DEFAULT is > 0, so
+    # the resolved value can't tell that apart from a forgotten '#:', which
+    # must still report No narration found.
+    pause_explicit = (args.pause is not None
+                      or (os.environ.get("SNIPPET_CAST_PAUSE") not in
+                          (None, str(PAUSE_DEFAULT))))
+    resolve_env_defaults(
+        args, tts="say", no_trace=False, every=False, subtitles=False,
+        typing=False, typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT,
+        manual_audio_dir=MANUAL_AUDIO_DIR_DEFAULT,
+        quiet=True, verbose=False, responsive=True, order=None, style=STYLE,
+        bg_color=BG_COLOR if BG_COLOR else BG_COLOR_NONE,
+        state_bg_color=PANEL_BG, state_fg_color=None,
+        highlight_color=HIGHLIGHT_COLOR, font_size=FONT_SIZE, screenflow=None)
+    # -v/--verbose is simply the inverse of -q/--quiet, which is on by
+    # default; it wins when both are given, since it is the one that had to be
+    # typed to mean anything. (--no-quiet says the same thing.)
+    if args.verbose:
+        args.quiet = False
+    # Tri-state, so it can't go through resolve_env_defaults(), whose whole
+    # contract is "fill anything still None" — None is a meaningful value here
+    # (auto-detect from the frame background).
+    if args.light_controls is None:
+        raw = os.environ.get("SNIPPET_CAST_LIGHT_CONTROLS")
+        # "auto" (and empty) keep the detection, so the variable can be
+        # present in an activation env without forcing a choice.
+        if raw is not None and raw.strip().lower() not in ("", "auto"):
+            args.light_controls = raw.strip().lower() in ("1", "true", "yes", "on")
+    args.style, args.bg_color, args.highlight_color = resolve_style_args(
+        args.style, args.bg_color, args.highlight_color)
+    args.state_bg_color, args.state_fg_color = resolve_panel_args(
+        args.state_bg_color, args.state_fg_color)
+    args.screenflow = resolve_screenflow_arg(args.screenflow)
+    if args.font_size < FONT_SIZE_MIN:
+        raise ValueError(f"--font-size must be >= {FONT_SIZE_MIN}.")
+    if args.tts not in BACKENDS:
+        raise ValueError(f"--tts: invalid choice {args.tts!r} "
+                         f"(choose from {', '.join(BACKENDS)})")
+    # Resolved AFTER the style/color strings are normalized, so the luminance
+    # test sees the same background the frames are rendered on.
+    light = _light_controls_for(args.style, args.bg_color,
+                                args.highlight_color, args.light_controls)
+    return SimpleNamespace(light=light, pause_explicit=pause_explicit,
+                           tts_explicit=tts_explicit,
+                           quiet_explicit=quiet_explicit,
+                           manual_dir_explicit=manual_dir_explicit)
+
+
+
+def video(code, tts=None, out=None, name=None, output_dir=None, trace=None,
+          every=None, subtitles=None, typing=None, typing_speed=None,
+          pause=None, order=None, style=None, bg_color=None,
+          highlight_color=None, state_bg_color=None, state_fg_color=None,
+          font_size=None, screenflow=None, manual_audio_dir=None, quiet=None,
+          verbose=None, embed=False, responsive=None, light_controls=None):
+    """Render an annotated snippet STRING and return the video, ready to
+    display. `%%snippet-cast` as a plain function call.
+
+    Reach for this instead of the cell magic whenever the top of the cell is
+    already spoken for — a Quarto page, where the `#|` directives must be the
+    first lines — or when the snippet is being built up in Python rather than
+    typed out. `code` is exactly the text you would write under
+    `%%snippet-cast`::
+
+        from snippet_cast import video
+
+        video('''
+        def add_one(n):  #: We define a function // n points to {n}.
+            return n + 1 #: ...and return one more // returns {n} plus one.
+        y = add_one(2)   #: Call it // y now points to {y}.
+        ''', tts="silent", subtitles=True)
+
+    Returns an ``IPython.display.HTML`` — leave it as the cell's last
+    expression and the video shows up inline, restyled exactly as the cell
+    magic's is (see _video/_controls_css). `build()` is the equivalent for a
+    snippet that already lives in its own .py file, and returns nothing.
+
+    Every parameter mirrors the same-named `snippet-cast` option and, left at
+    None, resolves the same way the cell magic's does: an explicit argument
+    beats `SNIPPET_CAST_<NAME>` in the environment, which beats the shipped
+    default (so `tts` is `say`, `order` is `exec`, and output is QUIET —
+    pass `verbose=True` for the per-beat progress). `trace` is the one
+    renamed: it follows `build()` rather than the `--no-trace` flag, so
+    `trace=False` is what drops the state panel. `bg_color="none"` (and the
+    same for the other colors) is the spelling for "use the style's own",
+    matching the CLI.
+
+    `out` sets the path outright; `name`/`output_dir` build one as
+    ``output_dir/name.mp4``. Given none of the three — and no
+    SNIPPET_CAST_NAME/SNIPPET_CAST_OUTPUT_DIR either — the video goes to
+    `.snippet-cast/<hash of the snippet>.mp4`, so re-running an unchanged
+    cell reuses its file and two snippets in one notebook never collide.
+
+    `embed`, `responsive` and `light_controls` are display-only, exactly as
+    on the cell magic; they have no CLI equivalent because `snippet-cast`
+    writes a file rather than showing one.
+
+    Raises `ValueError` — carrying the message `snippet-cast` would have
+    printed — for a bad option or a snippet the renderer refuses (no
+    narration, a rejected flag combination). Anything the snippet itself
+    raises while being traced is reported by `build()` as it always is.
+
+    Quarto `#|` directives are NOT stripped from `code`, unlike the cell
+    magic's body: there they had to be, because the cell body WAS the
+    snippet; here the directives sit above the call, outside the string, and
+    silently deleting lines from a string the caller assembled deliberately
+    would be the more surprising behavior.
+
+    Recording narration and exporting a script stay on `record_narration()`
+    and `export_script()`; both take a path, so write the snippet to a file
+    first.
+    """
+    args = SimpleNamespace(
+        tts=tts, output=out, name=name, output_dir=output_dir,
+        # The public spelling follows build()'s `trace`, but the environment
+        # variable is SNIPPET_CAST_NO_TRACE, so the negated name is what
+        # resolve_env_defaults() has to see. None must stay None — it is what
+        # says "nobody has expressed a preference yet".
+        no_trace=None if trace is None else not trace,
+        every=every, subtitles=subtitles, typing=typing,
+        typing_speed=typing_speed, pause=pause, order=order, style=style,
+        bg_color=bg_color, highlight_color=highlight_color,
+        state_bg_color=state_bg_color, state_fg_color=state_fg_color,
+        font_size=font_size, screenflow=screenflow,
+        manual_audio_dir=manual_audio_dir, quiet=quiet, verbose=verbose,
+        responsive=responsive, light_controls=light_controls)
+    opts = _resolve_render_options(args)
+    if opts.manual_dir_explicit and args.tts != "manual":
+        raise ValueError("manual_audio_dir only applies with tts='manual'.")
+    # Before anything fills name/output_dir in from the environment.
+    out_path = _resolve_output_path(args, code)
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".py", prefix="snippet_cast_video_")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(code)
+        try:
+            build(tmp_path, out_path, args.tts,
+                  trace=not args.no_trace, every=args.every,
+                  subtitles=args.subtitles, typing=args.typing,
+                  typing_speed=args.typing_speed, pause=args.pause,
+                  manual_audio_dir=args.manual_audio_dir,
+                  style=args.style, bg_color=args.bg_color,
+                  state_bg_color=args.state_bg_color,
+                  state_fg_color=args.state_fg_color,
+                  highlight_color=args.highlight_color,
+                  allow_unnarrated=opts.pause_explicit,
+                  font_size=args.font_size, screenflow=args.screenflow,
+                  quiet=args.quiet, order=args.order)
+        except SystemExit as e:
+            # build() reports a refused snippet or flag combination the way a
+            # command-line tool does. That is right for `snippet-cast` and
+            # wrong for a function: re-raise it as the ordinary exception a
+            # caller can catch, and that a Quarto render fails loudly on
+            # instead of quietly producing no video.
+            raise ValueError(str(e.code)) from None
+    finally:
+        os.unlink(tmp_path)
+
+    return _video(out_path, embed, args.responsive, opts.light)
 
 
 @magics_class
@@ -512,112 +753,34 @@ class SnippetCastMagics(Magics):
                   "%%snippet-cast, with the code on the lines below it.",
                   file=sys.stderr)
             return
-        # Captured before resolve_env_defaults fills in the "silent"/
-        # manual_audio_dir fallbacks below, so --record can tell an explicit
-        # --tts/env var apart from the hardcoded default it's about to
-        # silently override.
-        # Flag only, deliberately: the check below exists to catch someone
-        # typing "--record --tts say", not to veto --record because a
-        # project-wide activation env happens to name a backend.
-        tts_explicit = args.tts is not None
-        # Same "flag only" rule, and for the same reason: --quiet is ON by
-        # default now, so a bare --record must NOT trip the "recording is
-        # interactive" check below — only someone who actually typed -q did
-        # the thing that check exists to catch.
-        quiet_explicit = args.quiet is not None
-        # Compared against the default, not merely "is it set": a project-wide
-        # activation env (pixi's [tool.pixi.activation.env], a shell profile) may
-        # materialise EVERY SNIPPET_CAST_* var at its default value, and that is
-        # not the mistake this check exists to catch — which is passing an audio
-        # directory while forgetting --tts manual. Treating a default-valued env
-        # var as "explicit" made a bare invocation exit here and render nothing.
-        _env_manual_dir = os.environ.get("SNIPPET_CAST_MANUAL_AUDIO_DIR")
-        manual_dir_explicit = (
-            args.manual_audio_dir is not None
-            or (_env_manual_dir is not None
-                and _env_manual_dir != MANUAL_AUDIO_DIR_DEFAULT))
-        # Same trick for --pause: asking for a specific frame length is what
-        # opts a narration-less cell into a silent render — PAUSE_DEFAULT is
-        # > 0, so the resolved value can't tell that apart from a forgotten
-        # '#:', which must still report No narration found.
-        pause_explicit = (args.pause is not None
-                          or (os.environ.get("SNIPPET_CAST_PAUSE") not in
-                              (None, str(PAUSE_DEFAULT))))
-        # Only fall back to the cache directory when the cell said nothing
-        # about where its video should go — an explicit -o/-n/-d (or the
-        # matching env var) still wins. Env vars count only when they DIFFER
-        # from the default: a project-wide activation env may materialise all
-        # of SNIPPET_CAST_* at their defaults, and "SNIPPET_CAST_NAME=out"
-        # expresses no preference — treating it as one silently put every
-        # cell back to overwriting a single out.mp4.
-        output_explicit = (
-            any(v is not None for v in (args.output, args.name, args.output_dir))
-            or os.environ.get("SNIPPET_CAST_NAME", "out") != "out"
-            or os.environ.get("SNIPPET_CAST_OUTPUT_DIR",
-                              OUTPUT_DIR_DEFAULT) != OUTPUT_DIR_DEFAULT)
-        resolve_env_defaults(
-            args, tts="say", no_trace=False, every=False, subtitles=False,
-            typing=False, typing_speed=TYPE_SPEED, pause=PAUSE_DEFAULT, export_script=False,
-            manual_audio_dir=MANUAL_AUDIO_DIR_DEFAULT, record=False, no_frame=False,
-            quiet=True, verbose=False, responsive=True, order=None,
-            name="out", output_dir=OUTPUT_DIR_DEFAULT, style=STYLE,
-            bg_color=BG_COLOR if BG_COLOR else BG_COLOR_NONE,
-            state_bg_color=PANEL_BG, state_fg_color=None,
-            highlight_color=HIGHLIGHT_COLOR, font_size=FONT_SIZE,
-            screenflow=None)
-        # -v/--verbose is simply the inverse of -q/--quiet, which is on by
-        # default; it wins when both are given, since it is the one that had
-        # to be typed to mean anything. (--no-quiet says the same thing.)
-        if args.verbose:
-            args.quiet = False
-        # Tri-state, so it can't go through resolve_env_defaults(), whose
-        # whole contract is "fill anything still None" — None is a meaningful
-        # value here (auto-detect from the frame background).
-        if args.light_controls is None:
-            raw = os.environ.get("SNIPPET_CAST_LIGHT_CONTROLS")
-            # "auto" (and empty) keep the detection, so the variable can be
-            # present in an activation env without forcing a choice.
-            if raw is not None and raw.strip().lower() not in ("", "auto"):
-                args.light_controls = raw.strip().lower() in ("1", "true", "yes", "on")
+        # The three magic-only options; every other one is resolved by the
+        # shared _resolve_render_options() below, which video() uses too.
+        resolve_env_defaults(args, export_script=False, record=False,
+                             no_frame=False)
         try:
-            args.style, args.bg_color, args.highlight_color = resolve_style_args(
-                args.style, args.bg_color, args.highlight_color)
-            args.state_bg_color, args.state_fg_color = resolve_panel_args(
-                args.state_bg_color, args.state_fg_color)
-            args.screenflow = resolve_screenflow_arg(args.screenflow)
+            opts = _resolve_render_options(args)
         except ValueError as e:
             print(f"snippet-cast: {e}", file=sys.stderr)
             return
-        # Resolved once, AFTER the style/color strings are normalized, so the
-        # luminance test sees the same background the frames are rendered on.
-        light = _light_controls_for(args.style, args.bg_color,
-                                    args.highlight_color, args.light_controls)
-        if args.font_size < FONT_SIZE_MIN:
-            print(f"snippet-cast: --font-size must be >= {FONT_SIZE_MIN}.",
-                  file=sys.stderr)
-            return
-        if args.tts not in BACKENDS:
-            print(f"snippet-cast: --tts: invalid choice {args.tts!r} "
-                  f"(choose from {', '.join(BACKENDS)})", file=sys.stderr)
-            return
+        light = opts.light
 
         if args.record:
             # Recording is an interactive session whose prompts ARE its
             # output, so the quiet default must never silence it. Only an
             # explicit -q is the mistake worth refusing.
-            if args.quiet and quiet_explicit:
+            if args.quiet and opts.quiet_explicit:
                 print("snippet-cast: --quiet can't be used with --record: "
                       "recording is an interactive session whose prompts are "
                       "that output.", file=sys.stderr)
                 return
             args.quiet = False
-            if tts_explicit and args.tts != "manual":
+            if opts.tts_explicit and args.tts != "manual":
                 print(f"snippet-cast: --record always uses the manual backend; "
                       f"got --tts {args.tts!r}. Drop --tts (or set it to manual) "
                       "when using --record.", file=sys.stderr)
                 return
             args.tts = "manual"
-        elif manual_dir_explicit and args.tts != "manual":
+        elif opts.manual_dir_explicit and args.tts != "manual":
             print("snippet-cast: --manual-audio-dir only applies with --tts "
                   "manual (or --record).", file=sys.stderr)
             return
@@ -637,8 +800,7 @@ class SnippetCastMagics(Magics):
                     print(f"snippet-cast: {e.code}", file=sys.stderr)
                 return
 
-            out_path = (resolve_output_path(args.output, args.output_dir, args.name)
-                        if output_explicit else _cell_output_path(line, cell))
+            out_path = _resolve_output_path(args, line, cell)
 
             if args.record:
                 view = _LiveRecordView()
@@ -679,7 +841,7 @@ class SnippetCastMagics(Magics):
                       state_bg_color=args.state_bg_color,
                       state_fg_color=args.state_fg_color,
                       highlight_color=args.highlight_color,
-                      allow_unnarrated=pause_explicit,
+                      allow_unnarrated=opts.pause_explicit,
                       font_size=args.font_size, screenflow=args.screenflow,
                       quiet=args.quiet, order=args.order)
             except SystemExit as e:

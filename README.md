@@ -71,6 +71,34 @@ result = fib(7)          #: Call fib with seven; result becomes {result}.
 The cell magic takes the same flags as the CLI and displays the rendered MP4
 inline.
 
+`%%snippet-cast` has to be the cell's first line — and so do Quarto's `#|`
+directives, so they cannot share a cell. `snippet_cast.video()` is the same
+notebook front end as a plain function call, taking the snippet as a string:
+
+```python
+#| fig-column: margin
+#| echo: false
+from snippet_cast import video
+
+video("""
+def fib(n):              #: We define fib, taking one argument, n.
+    a, b = 0, 1          #: Start from the first two Fibonacci numbers.
+    for _ in range(n):   #: Loop n times.
+        a, b = b, a + b  #: Advance the pair; b becomes the running sum.
+    return a             #: Return a — the nth Fibonacci number.
+result = fib(7)          #: Call fib with seven; result becomes {result}.
+""", tts="silent", subtitles=True)
+```
+
+Every parameter is the same-named flag (`trace=False` for `--no-trace`),
+resolved the same way — argument, then `SNIPPET_CAST_<NAME>`, then the
+default — and it returns the video to display, so leave it as the cell's last
+expression. Don't make the snippet an f-string: `{result}` is snippet-cast's
+own interpolation. Given no `out`/`name`/`output_dir`, the video goes to
+`.snippet-cast/<hash of the snippet>.mp4`, so re-running an unchanged cell
+reuses its file. `build()` above is the equivalent for a snippet that already
+lives in its own `.py` file.
+
 See [SETUP.md](SETUP.md) for all TTS backends — the zero-setup `say` (macOS)
 and `manual` (your own recordings, including `--record` for recording live
 via the microphone) backends, plus configuring Piper (local) and ElevenLabs
