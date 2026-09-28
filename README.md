@@ -16,7 +16,8 @@ def fib(n):             #: We define fib, taking one argument, n.
 Each `#:` line becomes one "beat": the code is revealed up to that line, the
 line is highlighted, and its narration is spoken. `snippet-cast` renders
 syntax-highlighted code frames with a progressive reveal, a Python-Tutor-style
-live variable panel, optional burned-in captions and a typing-in animation,
+live variable panel (values as `y = 3`, functions the snippet defines as
+`add_one(n)`), optional burned-in captions and a typing-in animation,
 synthesises speech per line, and stitches everything into an MP4 with ffmpeg.
 
 ## Installation

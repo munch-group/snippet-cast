@@ -108,6 +108,9 @@ Key data structures:
 - **`Step`** `(line_no, disp, text, frame_id)` — one *execution* of a line, in
   completion order. `disp` = `{name: repr}` for the panel; `text` =
   `{name: str(value)}` for `{var}` interpolation; `frame_id` = `id(frame)`.
+  A name bound to a function the snippet DEFINES is the exception to both:
+  its `disp` is a `_Signature` (`"(n)"`, drawn as `add_one(n)`) and its
+  `text` the whole `"add_one(n)"` — see "What the state panel lists" below.
 - **`Beat`** `(revealed, highlight, narration, state)` — one render-ready unit
   = one frame + one narration clip. `narration` is already interpolated;
   `revealed` is a `frozenset[int]` of 1-based source lines visible at this
@@ -269,9 +272,12 @@ which is not true yet on the way in. Entry/call beats are silent, so
 synthesizing `""`: an empty synth is a near-zero-length clip, and under
 `--tts manual` it would consume a numbered recording and desync every later
 beat from `--export-script`'s numbering (the same rule `_narration_sequence()`
-already applies). An `"enter"` whose own `"done"` follows immediately with an
-identical state is dropped as a pure duplicate — that is every instantaneous
-line, such as a module-level `def`.
+already applies). An `"enter"` whose own `"done"` follows immediately with a
+state that has not meaningfully changed is dropped as a pure duplicate — that
+is every instantaneous line, such as a module-level `def`. "Not meaningfully"
+rather than "not at all": `_same_but_for_definitions()` also lets through a
+state that gained only function definitions, since a `def` now puts the
+function it creates in the panel — see "What the state panel lists".
 
 **Every beat carries `revealed=None`** — the whole snippet is on screen from
 the first frame and only the highlight moves, exactly as in `--every` mode and
@@ -966,6 +972,50 @@ cl,mk=s.parse(src); st=s.trace_run(src,'test/data/loop.py'); lr=s.loop_body_rang
 ### Common changes
 
 - **Add a TTS backend:** write `synth_x(text, out)->path`, add to `BACKENDS`. Done.
+- **What the state panel lists:** every name in the current frame's
+  `f_locals` that `_snapshot()` keeps — data via `_is_data()`/`_fmt_value()`,
+  drawn `name = value`, AND **function definitions**, drawn `add_one(n)`.
+  `_panel_row(name, val)` is the single source of truth for a row's shape,
+  returning the three pieces `(name, gap, value)` that concatenate to its
+  text; `plan_canvas()` measures the panel's width from it and
+  `render_panel()` draws from it, and invariant 1 needs those two to agree
+  exactly. Change a row's layout there, not in either caller.
+
+  A definition's value is a `_Signature` — a `str` SUBCLASS holding just the
+  parameter list (`"(n)"`). Being a `str` is what keeps it invisible to
+  everything that doesn't care: it rides through `Step.disp`, `Beat.state`
+  and the width measurement like any other display value, and a test can
+  still write `== {"add_one": "(n)"}`. Only `_panel_row()` looks at the type,
+  to drop the `=` — `add_one = (n)` reads as a variable holding a tuple.
+  Interpolation gets the whole thing (`text[name]` is `"add_one(n)"`), since
+  `{add_one}` in a narration otherwise renders `<function add_one at 0x...>`.
+
+  `_is_own_function()` decides what counts: a `types.FunctionType` whose
+  `__code__.co_filename` is the file being traced. Scoped to that file so the
+  panel stays about the code ON SCREEN — an imported function is a Python
+  function too, but the viewer never watched it being defined. Classes,
+  builtins, bound methods and `functools.partial` are all excluded by the
+  FunctionType test; a lambda bound to a name IS included, being a definition
+  like any other. `inspect.signature()` renders it (so defaults, keyword-only
+  args, `*args`/`**kwargs` and annotations all come out right, and
+  `functools.wraps` is followed through `__wrapped__`), `lru_cache`d because
+  `_snapshot()` runs on every traced line event — a function in scope through
+  a long loop would otherwise be re-introspected once per iteration.
+
+  **This broke `--order exec`'s instantaneous-line rule and needed an
+  explicit fix.** `_exec_beats()` drops the silent "about to run" beat of a
+  line whose own `"done"` follows immediately with the state unchanged, and a
+  module-level `def` was the archetype: nothing ran, so the two panels were
+  identical. Now they differ by exactly the name the `def` created, so the
+  test is `_same_but_for_definitions(before, after)` — unchanged, or changed
+  only by added `_Signature`s — rather than `==`. Without it every `def`
+  gains a silent frame AND a `def` carrying entry narration
+  (`step in / it is defined`) plays those entry words twice: once at the
+  definition, once at the call they were actually written for. Pinned by
+  `test_defining_a_function_does_not_add_an_exec_order_beat`, with
+  `test_a_line_that_really_changes_state_still_gets_its_entry_beat` guarding
+  the other side.
+
 - **Recolor the state panel:** `--state-bg-color '#rrggbb'` /
   `--state-fg-color '#rrggbb'` (or the `SNIPPET_CAST_STATE_*_COLOR` env vars,
   or `build(state_bg_color=..., state_fg_color=...)`) —

@@ -195,6 +195,7 @@ import argparse
 import ast
 import contextlib
 import functools
+import inspect
 import io
 import itertools
 import json
@@ -208,6 +209,7 @@ import sys
 import tempfile
 import time
 import tokenize
+import types
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -630,12 +632,60 @@ class Step:
                         # both filter down to "done" (see build_beats).
 
 
+def _clip(s):
+    """Trim a panel value to MAXVAL characters, marking that it was cut."""
+    return s if len(s) <= MAXVAL else s[: MAXVAL - 1] + "…"
+
+
 def _fmt_value(v):
     try:
         s = repr(v)
     except Exception:
         s = f"<{type(v).__name__}>"
-    return s if len(s) <= MAXVAL else s[: MAXVAL - 1] + "…"
+    return _clip(s)
+
+
+class _Signature(str):
+    """A function's parameter list, e.g. `"(n)"` — the panel value for a
+    function DEFINITION rather than for a piece of data.
+
+    A `str` subclass on purpose: it flows through Step.disp, Beat.state, the
+    panel width measurement and every test comparison exactly like the plain
+    strings beside it (`_Signature("(n)") == "(n)"`), while still being
+    distinguishable where it has to be — _panel_row(), which lays a function
+    row out as `add_one(n)` instead of `add_one = (n)`."""
+    __slots__ = ()
+
+
+@functools.lru_cache(maxsize=256)
+def _signature_of(func):
+    """`"(n)"` for `def add_one(n)`. Cached because _snapshot() runs on every
+    traced line event, so a function in scope through a long loop would
+    otherwise be re-introspected once per iteration.
+
+    inspect.signature() rather than a hand-rolled walk of `__code__`: it
+    gets defaults, keyword-only arguments, `*args`/`**kwargs` and
+    annotations right, and follows `__wrapped__` so a decorated function
+    reports the signature its caller actually sees."""
+    try:
+        return _clip(str(inspect.signature(func)))
+    except (TypeError, ValueError):
+        return "(...)"
+
+
+def _is_own_function(val, filename):
+    """A function DEFINED BY THE SNIPPET being traced — the only kind the
+    state panel shows.
+
+    Scoped to `filename` so the panel stays about the code on screen: an
+    imported function is a Python function too, but it was never defined in
+    front of the viewer, and listing it would say nothing about what this
+    snippet just did. Builtins (no `__code__`), classes, bound methods and
+    `functools.partial` objects are all excluded by the FunctionType test;
+    a lambda assigned to a name is included, since that is a definition."""
+    return (isinstance(val, types.FunctionType)
+            and getattr(val, "__code__", None) is not None
+            and val.__code__.co_filename == filename)
 
 
 def _is_data(name, val):
@@ -651,8 +701,21 @@ def _is_data(name, val):
 
 
 def _snapshot(frame):
+    # The traced file itself, which is what makes "defined by this snippet"
+    # decidable — trace_run() only ever snapshots frames from that file.
+    filename = frame.f_code.co_filename
     disp, text = {}, {}
     for name, val in frame.f_locals.items():
+        if name.startswith("__"):
+            continue
+        if _is_own_function(val, filename):
+            # A definition, not a value: shown as `add_one(n)`, and
+            # interpolated into narration as the same thing — `str(val)`
+            # would be a bare <function add_one at 0x...>.
+            sig = _Signature(_signature_of(val))
+            disp[name] = sig
+            text[name] = f"{name}{sig}"
+            continue
         if not _is_data(name, val):
             continue
         disp[name] = _fmt_value(val)
@@ -1072,8 +1135,28 @@ def _font_sizes(font_size=None):
                      caption=min(code, max(14, code - 4)))
 
 
+def _panel_row(name, val):
+    """One state-panel row, as the three pieces it is drawn from:
+    `(name, gap, value)`, whose concatenation is the whole row's text.
+
+    A piece of DATA is `name = value`; a function DEFINITION is
+    `add_one(n)` — no `=`, since the name and its parameter list read as one
+    thing (see _Signature). The name piece is drawn in the name color and
+    the value piece in the value color, so a signature's parameters pick up
+    the value color, which is what makes the two halves legible as one row.
+
+    The single source of truth for a row's shape: plan_canvas() measures the
+    panel's width from it and render_panel() draws from it, and critical
+    invariant 1 (every frame shares one resolution) needs those two to agree
+    exactly."""
+    if isinstance(val, _Signature):
+        return name, "", str(val)
+    return name, " ", f"= {val}"
+
+
 def render_panel(vars_dict, width, height, colors=None, fonts=None):
-    """A fixed-size 'state' panel listing name = value pairs."""
+    """A fixed-size 'state' panel listing one row per name in scope —
+    `name = value` for data, `add_one(n)` for a function definition."""
     colors = colors or PanelColors()
     fonts = fonts or _font_sizes()
     img = Image.new("RGB", (width, height), colors.bg)
@@ -1083,9 +1166,10 @@ def render_panel(vars_dict, width, height, colors=None, fonts=None):
     lh = asc + desc + 8
     x, y = PANEL_PAD, PANEL_PAD
     for name, val in vars_dict.items():
-        d.text((x, y), name, font=font, fill=colors.name)
-        nw = d.textlength(name + " ", font=font)
-        d.text((x + nw, y), f"= {val}", font=font, fill=colors.value)
+        label, gap, value = _panel_row(name, val)
+        d.text((x, y), label, font=font, fill=colors.name)
+        d.text((x + d.textlength(label + gap, font=font), y), value,
+               font=font, fill=colors.value)
         y += lh
     return img
 
@@ -1170,6 +1254,26 @@ ORDER = ORDER_EXEC        # the SHIPPED default, used wherever `order` is left
                           # only an explicit --order exec still errors there.
 
 
+def _same_but_for_definitions(before, after):
+    """True when going from `before` to `after` added nothing but function
+    definitions (and False if anything went away or a value changed).
+
+    This is _exec_beats()'s test for "the line ran instantaneously", and it
+    has to allow for definitions because the state panel now LISTS the
+    function a `def` creates. Before that it could simply compare the two
+    panels: a module-level `def` left them identical, which is how the
+    definition visit was recognised and its silent "about to run" beat
+    dropped. Now the panels differ by exactly the name the line brought into
+    existence — and nothing actually RAN, so the beat must still go, or every
+    `def` gains a silent frame AND a `def` carrying entry narration
+    (`step in / it is defined`) plays those entry words twice: once here, and
+    again at the call they were written for."""
+    if set(before) - set(after):
+        return False
+    return all(isinstance(v, _Signature)
+               for k, v in after.items() if before.get(k) != v)
+
+
 def _exec_beats(code_lines, markers, steps):
     """Beats in the order Python actually VISITS the lines (--order exec).
 
@@ -1231,7 +1335,8 @@ def _exec_beats(code_lines, markers, steps):
         nxt = visits[i + 1] if i + 1 < len(visits) else None
         redundant = (st.kind == "enter" and nxt is not None
                      and nxt.kind == "done" and nxt.line_no == st.line_no
-                     and nxt.depth == st.depth and nxt.disp == st.disp
+                     and nxt.depth == st.depth
+                     and _same_but_for_definitions(st.disp, nxt.disp)
                      # ...unless the line gives the entry its OWN words, in
                      # which case the two beats differ in what they SAY even
                      # though the panel is identical, and dropping one would
@@ -1901,7 +2006,7 @@ def plan_canvas(code_lines, beats, show_panel, subtitles,
         font = _mono_font(fonts.panel)
         meas = ImageDraw.Draw(Image.new("RGB", (1, 1)))
         longest = max(
-            (meas.textlength(f"{n} = {v}", font=font)
+            (meas.textlength("".join(_panel_row(n, v)), font=font)
              for b in beats for n, v in b.state.items()), default=0)
         panel_w = int(max(240, longest + 2 * PANEL_PAD))
 

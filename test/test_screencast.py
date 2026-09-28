@@ -758,7 +758,10 @@ def test_call_entry_steps_do_not_reach_every_mode_or_env_before():
 
     every = build_beats(code_lines, markers, steps, every=True,
                         loop_ranges=loop_body_ranges(DEF_SNIPPET))
-    assert [b.state for b in every if b.highlight == 1] == [{}]  # def stays bare
+    # One beat, and it is the DEFINER's frame — the function it just created,
+    # not the callee's freshly bound {"n": "7", "step": "5"}.
+    assert [b.state for b in every if b.highlight == 1] == [
+        {"add_one": "(n, step=5)"}]
     assert len(every) == len([st for st in steps if st.kind == "done"
                               and st.line_no in {1, 2, 3, 5}])
 
@@ -2819,3 +2822,134 @@ def test_theme_colors_a_real_snippet_token_by_token():
         "in": "6730c5", "range": "262680", "pass": "6730c5",
         "import": "6730c5", "numpy": "000000", "as": "6730c5", "np": "000000",
     }
+
+
+# --------------------------------------------------------------------------
+# Function definitions in the state panel: `add_one(n)`, not a <function ...>
+# --------------------------------------------------------------------------
+
+FUNC_SNIPPET = """\
+def add_one(n):   #: define it
+    return n + 1  #: return one more
+y = add_one(2)    #: call it
+"""
+
+
+def test_a_definition_appears_in_the_state_as_its_signature():
+    steps = trace_run(FUNC_SNIPPET, "<f>")
+    by_line = {(st.line_no, st.kind): st for st in steps}
+
+    # After the def statement runs, the function is in scope...
+    assert by_line[(1, "done")].disp == {"add_one": "(n)"}
+    # ...and it is still there at module level once y has a value.
+    assert by_line[(3, "done")].disp == {"add_one": "(n)", "y": "3"}
+    # Inside the call the panel is the function's own scope, as before.
+    assert by_line[(2, "done")].disp == {"n": "2"}
+
+
+def test_definition_signature_covers_defaults_starargs_and_lambdas():
+    src = ("def f(a, b=2, *rest, key=None, **kw):  #: one\n"
+           "    return a  #: two\n"
+           "g = lambda v: v  #: three\n"
+           "h = f(1)  #: four\n")
+    disp = {st.line_no: st.disp for st in trace_run(src, "<f>") if st.kind == "done"}
+
+    assert disp[1]["f"] == "(a, b=2, *rest, key=None, **kw)"
+    assert disp[3]["g"] == "(v)"          # a lambda is a definition too
+
+
+def test_only_functions_the_snippet_itself_defines_are_shown():
+    """An imported function was never defined in front of the viewer, so it
+    says nothing about what this snippet did; builtins and classes likewise."""
+    src = ("from math import sqrt\n"
+           "from json import dumps\n"          # a real Python function
+           "class Thing:  #: a class\n"
+           "    pass\n"
+           "r = sqrt(4)  #: compute\n")
+    disp = {st.line_no: st.disp for st in trace_run(src, "<f>") if st.kind == "done"}
+
+    assert disp[5] == {"r": "2.0"}      # no sqrt, no dumps, no Thing
+
+
+def test_a_nested_definition_shows_in_its_own_scope():
+    src = ("def outer():      #: outer\n"
+           "    def inner(k):  #: inner\n"
+           "        return k   #: body\n"
+           "    return inner(1)  #: call it\n"
+           "z = outer()  #: run\n")
+    disp = {(st.line_no, st.kind): st.disp
+            for st in trace_run(src, "<f>") if st.kind == "done"}
+
+    assert disp[(4, "done")] == {"inner": "(k)"}     # local to outer's frame
+    assert disp[(5, "done")] == {"outer": "()", "z": "1"}
+
+
+def test_a_definition_interpolates_into_narration_as_name_and_params():
+    """`{add_one}` must not come out as <function add_one at 0x...>."""
+    steps = trace_run(FUNC_SNIPPET, "<f>")
+    texts = {st.line_no: st.text for st in steps if st.kind == "done"}
+
+    assert texts[1]["add_one"] == "add_one(n)"
+
+    src = ("def add_one(n):   #: define\n"
+           "    return n + 1  #: body\n"
+           "y = add_one(2)    #: we now have {add_one}, and y is {y}\n")
+    code_lines, markers = parse(src)
+    beats = build_beats(code_lines, markers, trace_run(src, "<f>"), every=False)
+    assert beats[-1].narration == "we now have add_one(n), and y is 3"
+
+
+def test_panel_row_lays_a_definition_out_without_an_equals_sign():
+    """`add_one(n)`, not `add_one = (n)` — and the pieces must concatenate to
+    exactly what plan_canvas() measures the panel width from (invariant 1)."""
+    assert "".join(sc._panel_row("add_one", sc._Signature("(n)"))) == "add_one(n)"
+    assert "".join(sc._panel_row("y", "3")) == "y = 3"
+
+
+def test_a_signature_compares_and_formats_as_a_plain_string():
+    """It rides through Step.disp/Beat.state as an ordinary display value."""
+    sig = sc._Signature("(n)")
+    assert sig == "(n)" and f"{sig}" == "(n)" and len(sig) == 3
+
+
+def test_defining_a_function_does_not_add_an_exec_order_beat():
+    """A module-level `def` is instantaneous — nothing ran — so its silent
+    'about to run' beat is still dropped even though the panel now changes
+    (the function it created appears). Without that, every def gains a frame
+    and an entry narration plays at the definition as well as at the call."""
+    src = ("def f(n):      #: step in with n / it is defined\n"
+           "    return n   #: / returns\n"
+           "y = f(1)       #: we call / done\n")
+    code_lines, markers = parse(src)
+    beats = build_beats(code_lines, markers, trace_run(src, "<d>", entries=True),
+                        every=False, order=sc.ORDER_EXEC)
+
+    said = [(b.highlight, b.narration) for b in beats]
+    assert said.count((1, "step in with n")) == 1        # at the call only
+    assert said[0] == (1, "it is defined")               # the definition beat
+    assert beats[0].state == {"f": "(n)"}                # ...showing the function
+
+
+def test_a_line_that_really_changes_state_still_gets_its_entry_beat():
+    """The definitions-only exemption must not swallow an ordinary line."""
+    src = ("x = 1          #: before / after\n"
+           "y = x + 1      #: b2 / a2\n")
+    code_lines, markers = parse(src)
+    beats = build_beats(code_lines, markers, trace_run(src, "<d>", entries=True),
+                        every=False, order=sc.ORDER_EXEC)
+
+    assert [(b.highlight, b.narration) for b in beats] == [
+        (1, "before"), (1, "after"), (2, "b2"), (2, "a2")]
+
+
+@pytest.mark.skipif(not _rendering_available(), reason="requires ffmpeg and a resolvable FONT_NAME")
+def test_the_panel_draws_a_definition_and_a_value_differently(tmp_path):
+    """A pixel check that the two row shapes really differ on the frame: the
+    signature row has no '=' in it, so it is strictly narrower than the same
+    name rendered as data would be."""
+    from PIL import Image
+    as_def = sc.render_panel({"add_one": sc._Signature("(n)")}, 400, 120)
+    as_data = sc.render_panel({"add_one": "(n)"}, 400, 120)
+
+    assert isinstance(as_def, Image.Image)
+    assert list(as_def.getdata()) != list(as_data.getdata())
